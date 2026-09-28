@@ -20,7 +20,7 @@ class ChatRequest(BaseModel):
 router = APIRouter(prefix="/chat", tags=["Intelligence"])
 
 SYSTEM_PROMPT = """
-Tu és o ANALISTA SÉNIOR DE ESTRATÉGIA da Gauge.
+Tu és o ANALISTA SÉNIOR DE ESTRATÉGIA da Rakiti.
 O teu único conhecimento vem das ferramentas SQL disponibilizadas. 
 NUNCA uses o termo "Chapter", substitui sempre por "Portfólio".
 
@@ -61,7 +61,7 @@ CASO B) Se for um "Comparativo Trimestral":
 - (Bullet points curtos com a síntese do qualitativo)
 
 ## 💡 Insights Estratégicos
-> (Usa blockquotes para recomendações de alta prioridade. Ex: "A queda no volume de respostas da APEX sugere necessidade de reforço no engajamento da pesquisa.")
+> (Usa blockquotes para recomendações de alta prioridade. Ex: "A queda no volume de respostas do cliente X sugere necessidade de reforço no engajamento da pesquisa.")
 
 ⚠️ EXCEÇÕES E DADOS PARCIAIS:
 1. Se clicares em "Ver elogio/detrator" e a ferramenta retornar o texto na íntegra, imprime o comentário completo formatado em *itálico* usando um blockquote (>).
@@ -89,13 +89,13 @@ def db_obter_metricas_empresa(nome_empresa: str, comparar: bool = False):
             # 🎯 SQL TRIMESTRAL: Janelas de 0-90 dias vs 91-180 dias
             sql = text(f"""
                 SELECT 
-                    SUM(CASE WHEN DATEDIFF(day, created_at, GETDATE()) <= 90 THEN 1 ELSE 0 END) as total_atual,
-                    SUM(CASE WHEN DATEDIFF(day, created_at, GETDATE()) <= 90 AND nota >= 9 THEN 1 ELSE 0 END) as prom_atual,
-                    SUM(CASE WHEN DATEDIFF(day, created_at, GETDATE()) <= 90 AND nota <= 6 THEN 1 ELSE 0 END) as detr_atual,
+                    SUM(CASE WHEN DATEDIFF('day', created_at, GETDATE()) <= 90 THEN 1 ELSE 0 END) as total_atual,
+                    SUM(CASE WHEN DATEDIFF('day', created_at, GETDATE()) <= 90 AND nota >= 9 THEN 1 ELSE 0 END) as prom_atual,
+                    SUM(CASE WHEN DATEDIFF('day', created_at, GETDATE()) <= 90 AND nota <= 6 THEN 1 ELSE 0 END) as detr_atual,
                     
-                    SUM(CASE WHEN DATEDIFF(day, created_at, GETDATE()) BETWEEN 91 AND 180 THEN 1 ELSE 0 END) as total_ant,
-                    SUM(CASE WHEN DATEDIFF(day, created_at, GETDATE()) BETWEEN 91 AND 180 AND nota >= 9 THEN 1 ELSE 0 END) as prom_ant,
-                    SUM(CASE WHEN DATEDIFF(day, created_at, GETDATE()) BETWEEN 91 AND 180 AND nota <= 6 THEN 1 ELSE 0 END) as detr_ant
+                    SUM(CASE WHEN DATEDIFF('day', created_at, GETDATE()) BETWEEN 91 AND 180 THEN 1 ELSE 0 END) as total_ant,
+                    SUM(CASE WHEN DATEDIFF('day', created_at, GETDATE()) BETWEEN 91 AND 180 AND nota >= 9 THEN 1 ELSE 0 END) as prom_ant,
+                    SUM(CASE WHEN DATEDIFF('day', created_at, GETDATE()) BETWEEN 91 AND 180 AND nota <= 6 THEN 1 ELSE 0 END) as detr_ant
                 FROM dbo.nps_respostas r 
                 {filtro_empresa}
             """)
@@ -144,11 +144,11 @@ def db_listar_comentarios_recentes(nome_empresa: str, limite: int = 5):
         engine = get_engine()
         with engine.connect() as conn:
             sql = text("""
-                SELECT TOP (:limite) nota, motivo, created_at
+                SELECT nota, motivo, created_at
                 FROM dbo.nps_respostas 
-                WHERE (empresa = :nome OR empresa_id = (SELECT id FROM dbo.nps_empresas WHERE nome = :nome))
+                WHERE (empresa = :nome OR empresa_id IN (SELECT id FROM dbo.nps_empresas WHERE nome = :nome))
                   AND motivo IS NOT NULL AND motivo <> '' AND excluido = 0
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC LIMIT :limite
             """)
             res = conn.execute(sql, {"nome": nome_empresa, "limite": limite}).mappings().all()
             return json.dumps([{"nota": r.nota, "comentario": r.motivo} for r in res])
@@ -166,12 +166,12 @@ def db_obter_comentario_especifico(nome_empresa: str, trecho_comentario: str):
         with engine.connect() as conn:
             # 3. 🎯 Usamos UPPER e LIKE na empresa para ignorar espaços em branco
             sql = text("""
-                SELECT TOP 1 motivo, nota, created_at 
+                SELECT motivo, nota, created_at 
                 FROM dbo.nps_respostas 
                 WHERE (UPPER(empresa) LIKE UPPER(:nome))
-                  AND motivo LIKE :busca 
+                  AND motivo ILIKE :busca 
                   AND excluido = 0
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC LIMIT 1
             """)
             
             res = conn.execute(sql, {
@@ -193,7 +193,7 @@ def db_obter_comentario_especifico(nome_empresa: str, trecho_comentario: str):
 def obter_sugestoes_dinamicas(nome_empresa: str = None):
     # 🎯 1. Limpeza do Fallback (Removido o termo 'Chapter')
     if not nome_empresa:
-        return ["Resumo APEX", "Alertas AstraZeneca", "NPS Geral do Portfólio"]
+        return ["NPS Geral do Portfólio", "Principais detratores", "Comparativo trimestral"]
     
     """Busca um exemplo de cada extremo para gerar tags clicáveis"""
     try:
@@ -204,16 +204,16 @@ def obter_sugestoes_dinamicas(nome_empresa: str = None):
         with engine.connect() as conn:
             # Busca o detrator mais recente
             detrator = conn.execute(text("""
-                SELECT TOP 1 motivo FROM dbo.nps_respostas 
+                SELECT motivo FROM dbo.nps_respostas 
                 WHERE empresa = :nome AND nota <= 6 AND motivo IS NOT NULL 
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC LIMIT 1
             """), {"nome": nome_empresa}).scalar()
 
             # Busca o promotor mais recente
             promotor = conn.execute(text("""
-                SELECT TOP 1 motivo FROM dbo.nps_respostas 
+                SELECT motivo FROM dbo.nps_respostas 
                 WHERE empresa = :nome AND nota >= 9 AND motivo IS NOT NULL 
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC LIMIT 1
             """), {"nome": nome_empresa}).scalar()
 
             sugestoes = []
@@ -262,7 +262,7 @@ async def perguntar_inteligencia(requisicao: ChatRequest, usuario = Depends(get_
                         # 🎯 REGRA DE EXTRAÇÃO CEGA: PROIBE DATAS NO NOME
                         "nome_empresa": {
                             "type": "string", 
-                            "description": "APENAS o nome do cliente (ex: 'CGU', 'APEX', 'CNP'). NUNCA inclua expressões de tempo como 'nos últimos 30 dias'."
+                            "description": "APENAS o nome do cliente (ex: 'Farmácia São João', 'Transportes Rápido'). NUNCA inclua expressões de tempo como 'nos últimos 30 dias'."
                         },
                         "comparar": {"type": "boolean"}
                     },

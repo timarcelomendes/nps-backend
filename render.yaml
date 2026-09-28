@@ -1,0 +1,34 @@
+# Blueprint do Render: backend da Rakiti (Docker) + PostgreSQL do Render.
+# O banco foi criado manualmente no painel; cole a Internal Database URL em DATABASE_URL.
+services:
+  - type: web
+    name: rakiti-api
+    runtime: docker
+    region: virginia          # TEM de ser a mesma região do banco (a URL interna só funciona na mesma região)
+    plan: starter             # não dorme: o agendador (APScheduler) precisa rodar sempre
+    numInstances: 1           # 1 instância: o agendador e o disco não suportam várias
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/status
+    envVars:
+      - key: AMBIENTE
+        value: prod
+      - key: DATABASE_URL
+        sync: false           # Internal Database URL do Postgres no Render
+      - key: FRONTEND_URL
+        sync: false           # ex.: https://app.rakiti.com
+      - key: JWT_SECRET_KEY
+        generateValue: true   # o Render gera uma chave aleatória
+      - key: ENCRYPTION_KEY
+        sync: false           # gere com: python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_REMETENTE
+        value: pesquisa@rakiti.com
+      - key: EMAIL_REMETENTE_NOME
+        value: Rakiti
+      - key: OPENAI_API_KEY
+        sync: false           # opcional (também pode ser salva na tela de Configurações)
+    disk:                     # guarda imagens e avatares enviados (sem isso somem a cada deploy)
+      name: uploads
+      mountPath: /app/uploads
+      sizeGB: 1

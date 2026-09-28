@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from sqlalchemy import text
 from database import get_engine
@@ -6,8 +7,12 @@ from database import get_engine
 def get_openai_token():
     """
     Recupera a API Key do banco de dados. 
-    Usa cache para evitar hits desnecessários ao SQL Server em cada token de stream.
+    Usa cache para evitar hits desnecessários ao banco em cada token de stream.
+    Prioridade: variável de ambiente OPENAI_API_KEY; depois a chave salva nas Configurações.
     """
+    chave_env = os.getenv("OPENAI_API_KEY", "").strip()
+    if chave_env:
+        return chave_env
     try:
         engine = get_engine()
         with engine.connect() as conn:

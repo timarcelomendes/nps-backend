@@ -99,7 +99,7 @@ def load_respostas(
         FROM dbo.nps_respostas
         {'WHERE excluido = 0' if not incluir_excluidas else ''}
     )
-    SELECT TOP ({int(topn)})
+    SELECT
         r.resposta_id, 
         r.cliente_id AS resposta_cliente_id,
         c.nome AS cliente_nome, 
@@ -127,7 +127,7 @@ def load_respostas(
         r.data_resposta,                     
         COALESCE(r.data_resposta, r.created_at) AS data_exibicao,
         r.excluido,
-        (SELECT TOP 1 id FROM dbo.nps_acoes WHERE resposta_id = r.resposta_id) AS acao_vinculada
+        (SELECT id FROM dbo.nps_acoes WHERE resposta_id = r.resposta_id LIMIT 1) AS acao_vinculada
         
     FROM BaseHistorico r
     LEFT JOIN dbo.nps_clientes c ON r.cliente_id = c.cliente_id
@@ -136,6 +136,7 @@ def load_respostas(
     LEFT JOIN dbo.nps_companhias comp ON e.companhia_id = comp.id
     {where_sql}
     ORDER BY COALESCE(r.data_resposta, r.created_at) DESC, r.created_at DESC
+    LIMIT {int(topn)}
     """
     
     df = read_df(sql, params)
@@ -224,10 +225,10 @@ def processar_acao_automatica(resposta_id: str, nota: int, empresa_id: int, empr
             historico_str = ""
             try:
                 query_hist = text("""
-                    SELECT TOP 5 resposta_id, nota, motivo, created_at 
+                    SELECT resposta_id, nota, motivo, created_at 
                     FROM dbo.nps_respostas 
                     WHERE empresa_id = :eid OR (empresa = :enome AND empresa IS NOT NULL AND empresa != '')
-                    ORDER BY created_at DESC
+                    ORDER BY created_at DESC LIMIT 5
                 """)
                 res_hist = conn.execute(query_hist, {
                     "eid": emp_id_real if emp_id_real else -1, 
@@ -264,7 +265,7 @@ def processar_acao_automatica(resposta_id: str, nota: int, empresa_id: int, empr
                 pass
             
             if not chave_api:
-                descricao_txt += "\n\n⚠️ [ERRO DO SISTEMA]: A análise da Gauge AI não foi gerada porque a chave 'OPENAI_API_KEY' não foi encontrada."
+                descricao_txt += "\n\n⚠️ [ERRO DO SISTEMA]: A análise da Rakiti AI não foi gerada porque a chave 'OPENAI_API_KEY' não foi encontrada."
             else:
                 try:
                     from openai import OpenAI
@@ -276,7 +277,7 @@ CENÁRIO ATUAL: O cliente '{empresa_nome}' acabou de dar nota {nota} no NPS.
 Comentário de agora: '{texto_motivo}'
 {historico_str}
 TAREFA: Crie um plano de ação direto, prático e em bullet points (máximo 3 passos curtos) para a nossa equipa atuar. 
-Comece a sua resposta exatamente com a frase: '🤖 Análise Gauge AI:' e não inclua saudações.
+Comece a sua resposta exatamente com a frase: '🤖 Análise Rakiti AI:' e não inclua saudações.
 """
                     resposta_ai = client.chat.completions.create(
                         model="gpt-4o-mini",
@@ -398,13 +399,21 @@ def processar_webhook_fillout(payload: dict):
                     :fid, :sub_id, SYSUTCDATETIME(), :exp, :falta
                 )
             """)
+            # Só vincula ao cliente se ele existir (evita perder a resposta por chave estrangeira)
+            cid_valido = None
+            if cliente_id:
+                cid_valido = conn.execute(text("SELECT cliente_id FROM dbo.nps_clientes WHERE cliente_id = :cid"), {"cid": cliente_id}).scalar()
+            if not cid_valido and email:
+                cid_valido = conn.execute(text("SELECT cliente_id FROM dbo.nps_clientes WHERE email = :em LIMIT 1"), {"em": email}).scalar()
+
             conn.execute(sql_insert, {
-                "rid": resposta_id, "cid": cliente_id, "email": email, "emp": empresa, "eid": empresa_id if empresa_id > 0 else None,
+                "rid": resposta_id, "cid": cid_valido, "email": email, "emp": empresa, "eid": empresa_id if empresa_id > 0 else None,
                 "nota": nota, "cat": categoria, "motivo": motivo,
                 "fid": form_id, "sub_id": submission_id, "exp": expectativas, "falta": o_que_faltava
             })
             
-            if cliente_id:
+            if cid_valido:
+                cliente_id = cid_valido
                 sql_update_cli = text("""
                     UPDATE dbo.nps_clientes 
                     SET status_envio = 'Respondido', updated_at = SYSUTCDATETIME() 

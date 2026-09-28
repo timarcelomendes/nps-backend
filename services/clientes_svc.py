@@ -73,7 +73,7 @@ def load_clientes(q: str, ativo: str, perfil: str, topn: int) -> pd.DataFrame:
         (LOWER(c.nome) LIKE :like OR 
          LOWER(c.email) LIKE :like OR 
          LOWER(c.empresa) LIKE :like OR 
-         CAST(c.cliente_id AS NVARCHAR(100)) LIKE :like_id)
+         CAST(c.cliente_id AS VARCHAR(100)) LIKE :like_id)
         """)
         params["like"] = f"%{q.strip().lower()}%"
         params["like_id"] = f"%{q.strip()}%"
@@ -93,7 +93,7 @@ def load_clientes(q: str, ativo: str, perfil: str, topn: int) -> pd.DataFrame:
             ROW_NUMBER() OVER(PARTITION BY cliente_id ORDER BY COALESCE(data_envio_inicial, created_at) DESC) as rn
         FROM dbo.nps_disparos
     )
-    SELECT TOP ({int(topn)})
+    SELECT
         c.cliente_id, 
         c.nome, 
         c.email, 
@@ -105,12 +105,12 @@ def load_clientes(q: str, ativo: str, perfil: str, topn: int) -> pd.DataFrame:
         c.segmento_id, s.nome as segmento,
         
         COALESCE(d.data_ultimo_lembrete, d.data_envio_inicial, c.ultimo_envio) as ultimo_envio,
-        DATEADD(day, ISNULL((SELECT TOP 1 TRY_CAST(valor AS INT) FROM dbo.nps_configuracoes WHERE chave = 'recorrencia_dias'), 90), COALESCE(d.data_ultimo_lembrete, d.data_envio_inicial, c.ultimo_envio)) AS proximo_envio,
+        DATEADD('day', COALESCE((SELECT dbo.try_int(valor) FROM dbo.nps_configuracoes WHERE chave = 'recorrencia_dias' LIMIT 1), 90), COALESCE(d.data_ultimo_lembrete, d.data_envio_inicial, c.ultimo_envio)) AS proximo_envio,
 
         -- 🎯 MAGIA AQUI: Lógica à prova de falhas para o Estado
         CASE 
             -- 1. Se o ciclo de carência terminou, volta para a fila
-            WHEN GETDATE() >= DATEADD(day, ISNULL((SELECT TOP 1 TRY_CAST(valor AS INT) FROM dbo.nps_configuracoes WHERE chave = 'recorrencia_dias'), 90), COALESCE(d.data_ultimo_lembrete, d.data_envio_inicial, c.ultimo_envio)) THEN 'Pendente'
+            WHEN GETDATE() >= DATEADD('day', COALESCE((SELECT dbo.try_int(valor) FROM dbo.nps_configuracoes WHERE chave = 'recorrencia_dias' LIMIT 1), 90), COALESCE(d.data_ultimo_lembrete, d.data_envio_inicial, c.ultimo_envio)) THEN 'Pendente'
             
             -- 2. Se nunca foi disparado
             WHEN COALESCE(d.data_ultimo_lembrete, d.data_envio_inicial, c.ultimo_envio) IS NULL THEN 'Pendente'
@@ -133,7 +133,7 @@ def load_clientes(q: str, ativo: str, perfil: str, topn: int) -> pd.DataFrame:
         (SELECT COUNT(1) FROM dbo.nps_respostas r WHERE r.cliente_id = c.cliente_id) AS respostas_cliente,
         (SELECT COUNT(1) FROM dbo.nps_respostas r2 WHERE r2.empresa_id = c.empresa_id) AS respostas_empresa,
         
-        CAST(CASE WHEN EXISTS (SELECT 1 FROM dbo.nps_acoes a WHERE a.empresa_id = e.id AND a.status != 'Concluído') THEN 1 ELSE 0 END AS BIT) AS tem_acao_pendente
+        CAST(CASE WHEN EXISTS (SELECT 1 FROM dbo.nps_acoes a WHERE a.empresa_id = e.id AND a.status != 'Concluído') THEN 1 ELSE 0 END AS BOOLEAN) AS tem_acao_pendente
         
     FROM dbo.nps_clientes c
     LEFT JOIN dbo.nps_empresas e ON c.empresa_id = e.id
@@ -142,22 +142,23 @@ def load_clientes(q: str, ativo: str, perfil: str, topn: int) -> pd.DataFrame:
     LEFT JOIN dbo.nps_cargos cg ON c.cargo_id = cg.id
     LEFT JOIN LatestDisparo d ON c.cliente_id = d.cliente_id AND d.rn = 1
     {where_sql}
-    ORDER BY c.updated_at DESC;
+    ORDER BY c.updated_at DESC
+    LIMIT {int(topn)};
     """
 
     return read_df(sql, params)
 
-def insert_cliente(nome: str, email: str, telefone: str, empresa_id: int, perfil_id: int, segmento_id: int, cargo_id: int, ultimo_envio: str = None):
+def insert_cliente(nome: str, email: str, telefone: str, empresa_id: int, perfil_id: int, segmento_id: int, cargo_id: int, ultimo_envio: str = None, gestor: str = None):
     cliente_id = str(random.randint(100000000, 999999999))
 
     sql = """
     INSERT INTO dbo.nps_clientes
-      (cliente_id, nome, email, telefone, empresa_id, perfil_id, segmento_id, cargo_id,
+      (cliente_id, nome, email, telefone, empresa_id, perfil_id, segmento_id, cargo_id, gestor,
        ativo, status_envio, ultimo_envio, proximo_envio, ultimo_erro,
        created_at, updated_at)
     VALUES
-      (:cliente_id, :nome, :email, :telefone, :empresa_id, :perfil_id, :segmento_id, :cargo_id,
-       1, 'Pendente', :ultimo_envio, CAST(GETDATE() AS DATE), NULL,
+      (:cliente_id, :nome, :email, :telefone, :empresa_id, :perfil_id, :segmento_id, :cargo_id, :gestor,
+       1, 'Pendente', CAST(:ultimo_envio AS TIMESTAMP), CAST(GETDATE() AS DATE), NULL,
        SYSUTCDATETIME(), SYSUTCDATETIME());
     """
 
@@ -172,7 +173,8 @@ def insert_cliente(nome: str, email: str, telefone: str, empresa_id: int, perfil
             "perfil_id": perfil_id,
             "segmento_id": segmento_id,
             "cargo_id": cargo_id,
-            "ultimo_envio": ultimo_envio
+            "ultimo_envio": ultimo_envio,
+            "gestor": (gestor or "").strip() or None
         })
 
     return cliente_id
@@ -225,11 +227,20 @@ def set_ativo(cliente_id: str, ativo: int):
     exec_sql(sql, {"cliente_id": cliente_id, "ativo": int(ativo)})
 
 def delete_cliente(cliente_id: str, delete_respostas: bool = False) -> tuple[bool, str]:
-    if delete_respostas:
-        sql = "BEGIN TRANSACTION; DELETE FROM dbo.nps_respostas WHERE cliente_id = :cliente_id; DELETE FROM dbo.nps_clientes WHERE cliente_id = :cliente_id; IF @@ROWCOUNT = 1 COMMIT; ELSE ROLLBACK;"
-    else:
-        sql = "BEGIN TRANSACTION; DELETE FROM dbo.nps_clientes WHERE cliente_id = :cliente_id; IF @@ROWCOUNT = 1 COMMIT; ELSE ROLLBACK;"
-    exec_sql(sql, {"cliente_id": cliente_id})
+    from sqlalchemy import text as _text
+    engine = get_engine()
+    with engine.begin() as conn:  # transação única: tudo ou nada
+        params = {"cliente_id": cliente_id}
+        conn.execute(_text("DELETE FROM dbo.nps_disparos WHERE cliente_id = :cliente_id"), params)
+        if delete_respostas:
+            conn.execute(_text("DELETE FROM dbo.nps_acoes WHERE resposta_id IN (SELECT resposta_id FROM dbo.nps_respostas WHERE cliente_id = :cliente_id)"), params)
+            conn.execute(_text("DELETE FROM dbo.nps_respostas WHERE cliente_id = :cliente_id"), params)
+        else:
+            # mantém o histórico de respostas, apenas desvincula do cliente
+            conn.execute(_text("UPDATE dbo.nps_respostas SET cliente_id = NULL WHERE cliente_id = :cliente_id"), params)
+        res = conn.execute(_text("DELETE FROM dbo.nps_clientes WHERE cliente_id = :cliente_id"), params)
+        if res.rowcount != 1:
+            raise Exception("Cliente não encontrado.")
     return True, "Exclusão concluída ✅"
 
 def forcar_envio_db(cliente_id: str):

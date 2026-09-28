@@ -1,3 +1,4 @@
+from services.mail_provider import post_email, usando_resend
 import os
 import re
 import requests
@@ -122,8 +123,8 @@ def obter_configuracoes_email():
     try:
         with engine.connect() as conn:
             query = text("""
-                SELECT TOP 1 tenant_id, client_id, client_secret, refresh_token, email_remetente 
-                FROM dbo.nps_configuracoes_email
+                SELECT tenant_id, client_id, client_secret, refresh_token, email_remetente 
+                FROM dbo.nps_configuracoes_email LIMIT 1
             """)
             resultado = conn.execute(query).mappings().first()
             if resultado:
@@ -165,6 +166,8 @@ def gerar_access_token(config):
     
 def get_valid_access_token():
     """Função mestre para obter um token pronto para uso"""
+    if usando_resend():
+        return "resend"  # com Resend não há token OAuth; o envio usa RESEND_API_KEY
     config = obter_configuracoes_email()
     if not config or not config['refresh_token']:
         print("⚠️ E-mail não configurado ou não autorizado.")
@@ -242,7 +245,7 @@ def enviar_email_recuperacao(email_destino, nome_usuario, token):
     headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
 
     try:
-        response = requests.post(url_send, json=payload, headers=headers)
+        response = post_email(url_send, json=payload, headers=headers)
         
         # 🎯 REGISTRO DE LOG COM O NOME REAL DO BANCO
         status = "Enviado" if response.status_code == 202 else "Erro"
@@ -274,9 +277,9 @@ def enviar_email_senha_alterada(email_destino: str, nome_usuario: str):
         engine = get_engine()
         with engine.connect() as conn:
             config = conn.execute(text("SELECT email_remetente FROM dbo.nps_configuracoes_email")).mappings().first()
-            if not config or not config["email_remetente"]: return False
+            if (not config or not config["email_remetente"]) and not usando_resend(): return False
 
-            send_url = f"https://graph.microsoft.com/v1.0/users/{config['email_remetente']}/sendMail"
+            send_url = f"https://graph.microsoft.com/v1.0/users/{(config or {}).get('email_remetente', '')}/sendMail"
             
             html_content = f"""
             <div style="font-family: Arial, sans-serif; max-width: 500px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px;">
@@ -299,7 +302,7 @@ def enviar_email_senha_alterada(email_destino: str, nome_usuario: str):
             }
             
             headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
-            res = requests.post(send_url, json=email_body, headers=headers)
+            res = post_email(send_url, json=email_body, headers=headers)
             
             # 🎯 REGISTRO DE LOG COM O NOME REAL
             status = "Enviado" if res.status_code == 202 else "Erro"
@@ -318,13 +321,9 @@ def enviar_email_senha_alterada(email_destino: str, nome_usuario: str):
         return False
     
 def enviar_email_teste(email_destino):
-    config = obter_configuracoes_email()
-    if not config or not config['refresh_token']:
-        print("⚠️ E-mail não configurado ou não autorizado.")
-        return False
-
-    access_token = gerar_access_token(config)
+    access_token = get_valid_access_token()
     if not access_token:
+        print("⚠️ E-mail não configurado ou não autorizado.")
         return False
 
     url_send = "https://graph.microsoft.com/v1.0/me/sendMail"
@@ -343,7 +342,7 @@ def enviar_email_teste(email_destino):
     headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
 
     try:
-        response = requests.post(url_send, json=payload, headers=headers)
+        response = post_email(url_send, json=payload, headers=headers)
         if response.status_code == 202:
             registrar_log_disparo(email_destino, "Administrador", "Enviado", "Teste de Conexão - NPS Intelligence ✅")
             return True
@@ -370,11 +369,11 @@ def processar_disparos_nps():
         return
     
     sql_busca = text("""
-        SELECT TOP (100) c.cliente_id, c.email, c.nome, c.empresa, e.id AS empresa_id
+        SELECT c.cliente_id, c.email, c.nome, COALESCE(e.nome::text, c.empresa) AS empresa, e.id AS empresa_id
         FROM dbo.nps_clientes c
-        LEFT JOIN dbo.nps_empresas e ON c.empresa = e.nome
+        LEFT JOIN dbo.nps_empresas e ON e.id = c.empresa_id OR (c.empresa_id IS NULL AND c.empresa = e.nome)
         WHERE c.ativo = 1 AND c.status_envio IN ('Pendente', 'Erro') AND (c.proximo_envio IS NULL OR c.proximo_envio <= CAST(GETDATE() AS DATE))
-        ORDER BY COALESCE(c.proximo_envio, '1900-01-01') ASC
+        ORDER BY COALESCE(c.proximo_envio, '1900-01-01') ASC LIMIT 100
     """)
     
     try:
@@ -419,10 +418,10 @@ def processar_disparos_nps():
                         "saveToSentItems": True
                     }
 
-                    resposta_ms = requests.post("https://graph.microsoft.com/v1.0/me/sendMail", headers=headers, json=payload)
+                    resposta_ms = post_email("https://graph.microsoft.com/v1.0/me/sendMail", headers=headers, json=payload)
                     
                     if resposta_ms.status_code in (200, 202):
-                        sql_update = text("UPDATE dbo.nps_clientes SET status_envio = 'Enviado', ultimo_envio = CAST(GETDATE() AS DATE), proximo_envio = DATEADD(DAY, 90, CAST(GETDATE() AS DATE)), ultimo_erro = NULL, updated_at = SYSUTCDATETIME() WHERE cliente_id = :id")
+                        sql_update = text("UPDATE dbo.nps_clientes SET status_envio = 'Enviado', ultimo_envio = CAST(GETDATE() AS DATE), proximo_envio = DATEADD('day', 90, CAST(GETDATE() AS DATE)), ultimo_erro = NULL, updated_at = SYSUTCDATETIME() WHERE cliente_id = :id")
                         conn.execute(sql_update, {"id": cliente["cliente_id"]})
                         registrar_log_disparo(cliente["email"], nome_exibicao, "Enviado", payload["message"]["subject"], cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url)
                         enviados += 1
@@ -451,9 +450,9 @@ def disparar_convite_nps_especifico(cliente_ids: list, dominio_origem: str = Non
     engine = get_engine()
     
     sql_busca = text("""
-        SELECT c.cliente_id, c.email, c.nome, c.empresa, e.id AS empresa_id 
+        SELECT c.cliente_id, c.email, c.nome, COALESCE(e.nome::text, c.empresa) AS empresa, e.id AS empresa_id 
         FROM dbo.nps_clientes c 
-        LEFT JOIN dbo.nps_empresas e ON c.empresa = e.nome 
+        LEFT JOIN dbo.nps_empresas e ON e.id = c.empresa_id OR (c.empresa_id IS NULL AND c.empresa = e.nome) 
         WHERE c.cliente_id IN :lista_ids
     """).bindparams(bindparam('lista_ids', expanding=True))
     
@@ -494,10 +493,10 @@ def disparar_convite_nps_especifico(cliente_ids: list, dominio_origem: str = Non
                         "saveToSentItems": True
                     }
 
-                    resposta_ms = requests.post("https://graph.microsoft.com/v1.0/me/sendMail", headers=headers, json=payload)
+                    resposta_ms = post_email("https://graph.microsoft.com/v1.0/me/sendMail", headers=headers, json=payload)
                     
                     if resposta_ms.status_code in (200, 202):
-                        conn.execute(text("UPDATE dbo.nps_clientes SET status_envio = 'Enviado', ultimo_envio = CAST(GETDATE() AS DATE), proximo_envio = DATEADD(DAY, 90, CAST(GETDATE() AS DATE)), ultimo_erro = NULL, updated_at = SYSUTCDATETIME() WHERE cliente_id = :id"), {"id": cliente["cliente_id"]})
+                        conn.execute(text("UPDATE dbo.nps_clientes SET status_envio = 'Enviado', ultimo_envio = CAST(GETDATE() AS DATE), proximo_envio = DATEADD('day', 90, CAST(GETDATE() AS DATE)), ultimo_erro = NULL, updated_at = SYSUTCDATETIME() WHERE cliente_id = :id"), {"id": cliente["cliente_id"]})
                         registrar_log_disparo(cliente["email"], nome_exibicao, "Enviado", payload["message"]["subject"], cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url)
                     else:
                         registrar_log_disparo(cliente["email"], nome_exibicao, "Erro", payload["message"]["subject"], erro=resposta_ms.text, cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url)
@@ -538,7 +537,7 @@ def enviar_email_resposta(email_destino: str, nome: str, empresa: str, nota: int
     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
 
     try:
-        resposta_ms = requests.post("https://graph.microsoft.com/v1.0/me/sendMail", headers=headers, json=payload)
+        resposta_ms = post_email("https://graph.microsoft.com/v1.0/me/sendMail", headers=headers, json=payload)
         if resposta_ms.status_code in (200, 202):
             registrar_log_disparo(email_destino, primeiro_nome, "Enviado", assunto)
         else:
@@ -583,9 +582,9 @@ def enviar_email_confirmacao(email_destino: str, nome_usuario: str, secret_key: 
         engine = get_engine()
         with engine.connect() as conn:
             config = conn.execute(text("SELECT email_remetente FROM dbo.nps_configuracoes_email")).mappings().first()
-            if not config or not config["email_remetente"]: return False
+            if (not config or not config["email_remetente"]) and not usando_resend(): return False
 
-            send_url = f"https://graph.microsoft.com/v1.0/users/{config['email_remetente']}/sendMail"
+            send_url = f"https://graph.microsoft.com/v1.0/users/{(config or {}).get('email_remetente', '')}/sendMail"
             
             # Melhoria de UX: Saudação personalizada no HTML
             html_content = f"""
@@ -608,7 +607,7 @@ def enviar_email_confirmacao(email_destino: str, nome_usuario: str, secret_key: 
                 "saveToSentItems": "true"
             }
             headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
-            res_email = requests.post(send_url, json=email_body, headers=headers)
+            res_email = post_email(send_url, json=email_body, headers=headers)
             
             # 🎯 3. REGISTRO DE LOG COM O NOME REAL
             if res_email.status_code == 202:

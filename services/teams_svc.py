@@ -16,7 +16,7 @@ def enviar_alerta_teams(resposta_id: str, cliente_id: str, nome: str, email: str
             
             perfil, segmento = "-", "-"
             if cliente_id:
-                query_cli = text("SELECT perfil_decisor, segmento FROM dbo.nps_clientes WHERE cliente_id = :cid")
+                query_cli = text("SELECT p.nome AS perfil_decisor, s.nome AS segmento FROM dbo.nps_clientes c LEFT JOIN dbo.nps_perfis p ON p.id = c.perfil_id LEFT JOIN dbo.nps_segmentos s ON s.id = c.segmento_id WHERE c.cliente_id = :cid")
                 res_cli = conn.execute(query_cli, {"cid": cliente_id}).fetchone()
                 if res_cli:
                     perfil = res_cli.perfil_decisor or "-"

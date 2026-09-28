@@ -7,11 +7,10 @@ gunicorn
 python-multipart
 
 # ==========================================
-# 🗄️ BANCO DE DADOS (SQL Server)
+# 🗄️ BANCO DE DADOS (PostgreSQL)
 # ==========================================
 sqlalchemy
-pyodbc
-pymssql
+psycopg[binary]
 
 # ==========================================
 # 🔐 SEGURANÇA, AUTENTICAÇÃO E SSO

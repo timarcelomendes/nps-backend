@@ -19,11 +19,17 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # 🎯 Defina o esquema aqui para que o auth.py não precise do main.py
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
+import bcrypt as _bcrypt
+
 def hash_password(password: str):
-    return pwd_context.hash(password[:72])
+    # bcrypt direto (o passlib é incompatível com bcrypt >= 4.1)
+    return _bcrypt.hashpw(password.encode("utf-8")[:72], _bcrypt.gensalt()).decode("utf-8")
 
 def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return _bcrypt.checkpw(plain_password.encode("utf-8")[:72], hashed_password.encode("utf-8"))
+    except Exception:
+        return False
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
     to_encode = data.copy()

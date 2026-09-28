@@ -1,61 +1,66 @@
 import os
-import urllib.parse
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# 🎯 CRÍTICO: Esta variável TEM de estar aqui, no topo do ficheiro
+# Instância única do engine (pool de conexões compartilhado)
 _engine_instance = None
 
+
+def _montar_url() -> str:
+    """Lê a DATABASE_URL (padrão do Render) e ajusta para o driver psycopg 3."""
+    url = os.getenv("DATABASE_URL", "").strip()
+    if not url:
+        raise RuntimeError("DATABASE_URL não configurada. Ex.: postgresql://usuario:senha@host:5432/banco")
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://"):]
+    return url
+
+
+def _bool_para_int(valor):
+    # As colunas de flag (ativo, excluido, revogado...) são SMALLINT 0/1, como no SQL Server.
+    if isinstance(valor, bool):
+        return int(valor)
+    return valor
+
+
 def get_engine():
-    # 🎯 E esta linha TEM de ser a primeira dentro da função
     global _engine_instance
-    
+
     if _engine_instance is not None:
         return _engine_instance
 
-    server = os.getenv("SQL_SERVER", "").strip()
-    database = os.getenv("SQL_DB", "").strip()
-    username = os.getenv("SQL_USER", "").strip()
-    password = os.getenv("SQL_PASSWORD", "").strip()
+    print("🔌 Criando nova conexão com o PostgreSQL...")
 
-    # Limpeza do servidor
-    server = server.replace("tcp:", "").replace(",1433", "").replace("https://", "")
-    
-    if "@" in username:
-        username = username.split("@")[0]
-        
-    if "database.windows.net" in server:
-        short_server = server.split(".")[0]
-        usuario_final = f"{username}@{short_server}"
-    else:
-        usuario_final = username
-
-    senha_codificada = urllib.parse.quote_plus(password)
-    usuario_codificado = urllib.parse.quote_plus(usuario_final)
-    
-    conn_url = f"mssql+pymssql://{usuario_codificado}:{senha_codificada}@{server}:1433/{database}"
-    
-    print(f"🔌 Criando nova conexão... Servidor: {server}")
-    
-    # 🎯 Atribuição à variável global
     _engine_instance = create_engine(
-        conn_url,
-        pool_size=15,
-        max_overflow=25,
+        _montar_url(),
+        pool_size=5,
+        max_overflow=10,
         pool_pre_ping=True,
         pool_recycle=300,
         future=True,
         connect_args={
-            "login_timeout": 30,
-            "timeout": 30
-        }
+            "connect_timeout": 30,
+            # schema "dbo" primeiro: as funções de compatibilidade (GETDATE, DATEADD...) moram nele
+            "options": "-c search_path=dbo,public -c timezone=UTC",
+        },
     )
+
+    @event.listens_for(_engine_instance, "before_cursor_execute", retval=True)
+    def _converter_parametros(conn, cursor, statement, parameters, context, executemany):
+        if isinstance(parameters, dict):
+            parameters = {k: _bool_para_int(v) for k, v in parameters.items()}
+        elif isinstance(parameters, (list, tuple)) and parameters and isinstance(parameters[0], dict):
+            parameters = [{k: _bool_para_int(v) for k, v in p.items()} for p in parameters]
+        return statement, parameters
+
     return _engine_instance
 
+
 def exec_sql(sql: str, params: dict | None = None):
-    # Agora o exec_sql consegue chamar o get_engine sem erro
     engine = get_engine()
     with engine.begin() as conn:
         return conn.execute(text(sql), params or {})
