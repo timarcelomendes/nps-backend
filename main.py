@@ -54,6 +54,10 @@ scheduler = BackgroundScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 1. Cria as tabelas e o Admin inicial se o banco estiver vazio
+    from bootstrap_db import preparar_banco
+    preparar_banco()
+
     # 2. Ao iniciar o servidor, vai buscar o horário guardado no banco
     hora_teams, minuto_teams = 8, 0 # Padrão
     try:

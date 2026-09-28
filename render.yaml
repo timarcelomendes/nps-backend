@@ -26,6 +26,14 @@ services:
         value: pesquisa@rakiti.com
       - key: EMAIL_REMETENTE_NOME
         value: Rakiti
+      - key: ADMIN_EMAIL
+        sync: false           # seu e-mail de Admin (criado sozinho na 1ª inicialização)
+      - key: ADMIN_SENHA
+        sync: false           # senha inicial do Admin (troque depois pela tela de perfil)
+      - key: ADMIN_NOME
+        value: Marcelo Mendes
+      - key: DOMINIOS_PERMITIDOS
+        sync: false           # ex.: rakiti.com, gmail.com (padrão: domínio do ADMIN_EMAIL)
       - key: OPENAI_API_KEY
         sync: false           # opcional (também pode ser salva na tela de Configurações)
     disk:                     # guarda imagens e avatares enviados (sem isso somem a cada deploy)
