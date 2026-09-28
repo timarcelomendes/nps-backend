@@ -4,7 +4,7 @@ services:
   - type: web
     name: rakiti-api
     runtime: docker
-    region: virginia          # TEM de ser a mesma região do banco (a URL interna só funciona na mesma região)
+    region: oregon            # TEM de ser a mesma região do banco (data_rakiti está em oregon)
     plan: starter             # não dorme: o agendador (APScheduler) precisa rodar sempre
     numInstances: 1           # 1 instância: o agendador e o disco não suportam várias
     dockerfilePath: ./Dockerfile
