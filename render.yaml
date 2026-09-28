@@ -5,7 +5,7 @@ services:
     name: rakiti-api
     runtime: docker
     region: oregon            # TEM de ser a mesma região do banco (data_rakiti está em oregon)
-    plan: starter             # não dorme: o agendador (APScheduler) precisa rodar sempre
+    plan: free                # grátis para testes; troque para starter quando tiver cliente (não dorme, agendador roda)
     numInstances: 1           # 1 instância: o agendador e o disco não suportam várias
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/status
@@ -36,7 +36,8 @@ services:
         sync: false           # ex.: rakiti.com, gmail.com (padrão: domínio do ADMIN_EMAIL)
       - key: OPENAI_API_KEY
         sync: false           # opcional (também pode ser salva na tela de Configurações)
-    disk:                     # guarda imagens e avatares enviados (sem isso somem a cada deploy)
-      name: uploads
-      mountPath: /app/uploads
-      sizeGB: 1
+    # Disco persistente para uploads: disponível só em plano pago. Ao mudar para starter, descomente:
+    # disk:
+    #   name: uploads
+    #   mountPath: /app/uploads
+    #   sizeGB: 1
