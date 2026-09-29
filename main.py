@@ -1576,7 +1576,8 @@ def get_dashboard_kpis(
             
             # Filtro Ativos
             parametros["apenas_ativos"] = 1 if apenas_ativos else 0
-            filtros_sql.append("(:apenas_ativos = 0 OR e.ativo = 1)")
+            # respostas sem empresa (ex.: link público) também contam, igual ao gráfico de evolução
+            filtros_sql.append("(:apenas_ativos = 0 OR e.ativo = 1 OR COALESCE(r.empresa_id, c.empresa_id) IS NULL)")
             
             if companhia and companhia not in ("Todas as Companhias", "Todos os grupos"):
                 filtros_sql.append("e.companhia_id IN (SELECT id FROM dbo.nps_companhias WHERE nome = :companhia)")
@@ -1598,11 +1599,10 @@ def get_dashboard_kpis(
                 parametros["data_fim"] = f"{data_fim} 23:59:59"
 
             # CONSTRUÇÃO SEGURA DOS CONECTORES LOGICOS
-            condicao_filtro = ""
-            condicao_filtro_and = ""
-            if len(filtros_sql) > 0:
-                condicao_filtro = " WHERE " + " AND ".join(filtros_sql)
-                condicao_filtro_and = " AND " + " AND ".join(filtros_sql)
+            # respostas excluídas não entram em nenhum número
+            filtros_efetivos = filtros_sql + ["(r.excluido = 0 OR r.excluido IS NULL)"]
+            condicao_filtro = " WHERE " + " AND ".join(filtros_efetivos)
+            condicao_filtro_and = " AND " + " AND ".join(filtros_efetivos)
 
             # --- 3. PROCESSAMENTO DE PALAVRAS MAIS USADAS ---
             sql_termos = text(f"""
@@ -1621,7 +1621,11 @@ def get_dashboard_kpis(
             stop_words = {
                 'para', 'com', 'mais', 'esta', 'está', 'pela', 'pelo', 'como', 'muito', 'tudo', 
                 'fazer', 'quando', 'você', 'pode', 'seria', 'estão', 'neste', 'esse', 'isso',
-                'pela', 'pelo', 'uma', 'umas', 'uns', 'tem', 'têm', 'fui', 'foi', 'ser', 'bom', 'bem'
+                'pela', 'pelo', 'uma', 'umas', 'uns', 'tem', 'têm', 'fui', 'foi', 'ser', 'bom', 'bem',
+                'também', 'tambem', 'porque', 'ainda', 'sempre', 'nada', 'pouco', 'sobre', 'vocês', 'voces',
+                'estou', 'estava', 'eles', 'elas', 'minha', 'meus', 'minhas', 'nossa', 'nosso', 'aqui', 'então',
+                'entao', 'mesmo', 'depois', 'antes', 'agora', 'outro', 'outra', 'sendo', 'essa', 'este', 'isto',
+                'algum', 'alguma', 'cada', 'qual', 'quais', 'onde', 'teve', 'tinha', 'fica', 'ficou', 'nota'
             }
             
             texto_unificado = " ".join([str(c).lower() for c in comentarios_raw if c])
@@ -1695,19 +1699,24 @@ def get_dashboard_kpis(
             
             feedbacks_raw = conn.execute(sql_feedbacks, parametros).mappings().all()
             
+            # Temas pensados para PME (distribuição, transporte, varejo e serviços).
+            # Casamento por palavra inteira/início de palavra, para "api" não casar com "rápido".
             regras_tags = {
-                "Performance": ["lento", "lentidão", "trava", "demora", "carregar", "devagar"],
-                "UX/UI": ["difícil", "layout", "design", "confuso", "interface", "navegação"],
-                "Atendimento": ["suporte", "atendimento", "ajuda", "cs", "resposta"],
-                "Integração": ["integração", "jira", "api", "conectar", "sincronizar"],
-                "Bugs": ["erro", "bug", "falha", "quebrou", "problema"]
+                "Prazo e entrega": ["atras", "prazo", "demor", "entreg", "chegou", "chegada", "tarde", "espera"],
+                "Produto e avarias": ["avari", "quebrad", "danific", "defeit", "faltand", "faltou", "errad", "trocad", "vencid", "qualidade"],
+                "Atendimento": ["atendiment", "atendent", "suporte", "vendedor", "educad", "grosso", "grossa", "motorista", "entregador"],
+                "Preço e condições": ["preço", "preco", "caro", "cara", "valor", "desconto", "frete", "pagamento", "boleto", "prazo de pagamento"],
+                "Comunicação": ["retorno", "aviso", "avisar", "avisaram", "informação", "informacao", "contato", "responder", "respondeu", "whatsapp", "telefone"],
+                "Sistema e pedidos": ["site", "sistema", "aplicativo", "app", "pedido", "nota fiscal", "cadastro", "erro", "bug"],
             }
-            
+            _padroes_tags = {tema: re.compile(r"\b(" + "|".join(re.escape(k) for k in chaves) + r")", re.IGNORECASE)
+                             for tema, chaves in regras_tags.items()}
+
             feedbacks_processados = []
             for f_raw in feedbacks_raw:
                 f = dict(f_raw)
                 texto = str(f.get("comentario") or "").lower()
-                f["tags"] = [tag for tag, keys in regras_tags.items() if any(k in texto for k in keys)]
+                f["tags"] = [tag for tag, padrao in _padroes_tags.items() if padrao.search(texto)]
                 feedbacks_processados.append(f)
 
             # --- 7. CÁLCULOS RESGATES ---
@@ -1743,11 +1752,6 @@ def get_dashboard_kpis(
             detratores_resgatados = len(res_resgatados_raw)
             lista_resgatados = [dict(r) for r in res_resgatados_raw]
             
-            res_resgatados_raw = conn.execute(query_resgatados, parametros).mappings().all()
-            
-            detratores_resgatados = len(res_resgatados_raw)
-            lista_resgatados = [dict(r) for r in res_resgatados_raw]
-            
             # --- VARIÁVEIS ANTIGAS ---
             from datetime import datetime, timedelta, timezone
             
@@ -1755,7 +1759,8 @@ def get_dashboard_kpis(
             params_ant = {}
             
             params_ant["apenas_ativos"] = 1 if apenas_ativos else 0
-            filtros_sql_ant.append("(:apenas_ativos = 0 OR e.ativo = 1)")
+            filtros_sql_ant.append("(:apenas_ativos = 0 OR e.ativo = 1 OR COALESCE(r.empresa_id, c.empresa_id) IS NULL)")
+            filtros_sql_ant.append("(r.excluido = 0 OR r.excluido IS NULL)")
             
             if companhia and companhia not in ("Todas as Companhias", "Todos os grupos"):
                 filtros_sql_ant.append("e.companhia_id IN (SELECT id FROM dbo.nps_companhias WHERE nome = :companhia)")
@@ -1798,11 +1803,11 @@ def get_dashboard_kpis(
             """)
             
             res_ant = conn.execute(sql_nps_ant, params_ant).mappings().first()
-            nps_anterior = 0
-            if res_ant and res_ant['total'] > 0:
+            # sem respostas no período anterior não há comparação (evita "variação" falsa)
+            variacao_nps = None
+            if res_ant and res_ant['total'] > 0 and total > 0:
                 nps_anterior = round(((res_ant['prom'] - res_ant['detr']) / res_ant['total']) * 100)
-                
-            variacao_nps = nps_score - nps_anterior
+                variacao_nps = nps_score - nps_anterior
 
             # 8. TÓPICOS CRÍTICOS ---
             sql_todos_comentarios = text(f"""
@@ -1814,7 +1819,6 @@ def get_dashboard_kpis(
                 { "AND" if condicao_filtro else "WHERE" } 
                     r.motivo IS NOT NULL 
                     AND LENGTH(CAST(r.motivo AS TEXT)) > 0 
-                    AND r.excluido = 0
             """)
             
             todos_comentarios = conn.execute(sql_todos_comentarios, parametros).mappings().all()
@@ -1824,8 +1828,8 @@ def get_dashboard_kpis(
             for row in todos_comentarios:
                 texto = str(row["comentario"]).lower()
                 nota = float(row["nota"])
-                for tema, keywords in regras_tags.items():
-                    if any(k in texto for k in keywords):
+                for tema, padrao in _padroes_tags.items():
+                    if padrao.search(texto):
                         topicos_agg[tema]["mencoes"] += 1
                         topicos_agg[tema]["soma_notas"] += nota
                         
@@ -1865,12 +1869,7 @@ def get_dashboard_kpis(
                   {condicao_resgate_and}      
             """)
             
-            res_perdidos_raw = conn.execute(query_perdidos, parametros).mappings().all()
-            
-            clientes_em_risco = len(res_perdidos_raw)
-            queda_drastica = sum(1 for r in res_perdidos_raw if r['queda_drastica'] == 1)
-            lista_risco = [dict(r) for r in res_perdidos_raw]
-            
+
             res_perdidos_raw = conn.execute(query_perdidos, parametros).mappings().all()
             
             clientes_em_risco = len(res_perdidos_raw)
@@ -1951,6 +1950,7 @@ def get_dashboard_detalhes(
             if len(filtros_sql_c) > 0:
                 str_filtro_c += " AND " + " AND ".join(filtros_sql_c)
             str_filtro_c += " AND (r.excluido = 0 OR r.excluido IS NULL)"
+            str_filtro_c += " AND (:apenas_ativos = 0 OR e.ativo = 1 OR COALESCE(r.empresa_id, c.empresa_id) IS NULL)"
                 
             str_filtro_puro = "WHERE 1=1"
             if len(filtros_sql_puro) > 0:
@@ -1966,9 +1966,16 @@ def get_dashboard_detalhes(
                     MAX(COALESCE(r.data_resposta, r.created_at)) as data_ultima_resposta,
                     
                     (SELECT a.id FROM dbo.nps_acoes a WHERE a.empresa_id = MAX(e.id) ORDER BY a.created_at DESC LIMIT 1) as acao_id,
-                    (SELECT a.status FROM dbo.nps_acoes a WHERE a.empresa_id = MAX(e.id) ORDER BY a.created_at DESC LIMIT 1) as acao_status,
+                    (SELECT COALESCE(a.status, 'Pendente') FROM dbo.nps_acoes a WHERE a.empresa_id = MAX(e.id) ORDER BY a.created_at DESC LIMIT 1) as acao_status,
                     -- 🎯 A LINHA ABAIXO FOI ADICIONADA PARA TRAZER A DATA PARA O RADAR:
                     (SELECT a.created_at FROM dbo.nps_acoes a WHERE a.empresa_id = MAX(e.id) ORDER BY a.created_at DESC LIMIT 1) as acao_criada_em,
+                    (SELECT a.prazo_limite FROM dbo.nps_acoes a WHERE a.empresa_id = MAX(e.id) ORDER BY a.created_at DESC LIMIT 1) as acao_prazo,
+                    (SELECT CAST(r2.motivo AS TEXT) FROM dbo.nps_respostas r2
+                       LEFT JOIN dbo.nps_clientes c2 ON r2.cliente_id = c2.cliente_id
+                      WHERE COALESCE(r2.empresa_id, c2.empresa_id) = MAX(e.id) AND r2.nota <= 6
+                        AND r2.motivo IS NOT NULL AND LENGTH(CAST(r2.motivo AS TEXT)) > 0
+                        AND (r2.excluido = 0 OR r2.excluido IS NULL)
+                      ORDER BY r2.created_at DESC LIMIT 1) as ultimo_comentario,
 
                     ROUND(
                         (SUM(CASE WHEN r.nota >= 9 THEN 1.0 ELSE 0 END) / NULLIF(COUNT(r.resposta_id), 0) * 100) - 
@@ -1981,7 +1988,6 @@ def get_dashboard_detalhes(
                 LEFT JOIN dbo.nps_gestores g ON e.gestor_id = g.id
                 
                 {str_filtro_c}
-                AND (:apenas_ativos = 0 OR e.ativo = 1)
                 
                 GROUP BY {coluna_nome}
                 ORDER BY nps DESC, data_ultima_resposta DESC;
@@ -2006,9 +2012,20 @@ def get_dashboard_detalhes(
             if res_taxa and res_taxa['total_convidados'] > 0:
                 taxa_pct = round((res_taxa['total_responderam'] / res_taxa['total_convidados']) * 100)
 
+            # Ações em aberto da conta (todas, inclusive as sem empresa: CSAT e link público)
+            acoes = conn.execute(text("""
+                SELECT COUNT(*) AS abertas,
+                       SUM(CASE WHEN prazo_limite < CURRENT_TIMESTAMP THEN 1 ELSE 0 END) AS vencidas
+                FROM dbo.nps_acoes WHERE COALESCE(status, 'Pendente') <> 'Concluído'
+            """)).mappings().first()
+
         return {
             "ranking": ranking,
-            "taxa_resposta": taxa_pct
+            "taxa_resposta": taxa_pct,
+            "total_convidados": int(res_taxa['total_convidados'] or 0) if res_taxa else 0,
+            "total_responderam": int(res_taxa['total_responderam'] or 0) if res_taxa else 0,
+            "acoes_abertas": int(acoes["abertas"] or 0),
+            "acoes_vencidas": int(acoes["vencidas"] or 0),
         }
     except Exception as e:
         import traceback
@@ -2068,7 +2085,7 @@ def get_dashboard_trend(
                     LEFT JOIN dbo.nps_empresas e ON COALESCE(r.empresa_id, c.empresa_id) = e.id
                     {condicao}
                     GROUP BY LEFT(CAST(COALESCE(r.data_resposta, r.created_at) AS VARCHAR(10)), 7)
-                    ORDER BY LEFT(CAST(COALESCE(r.data_resposta, r.created_at) AS VARCHAR(10)), 7) DESC LIMIT 6
+                    ORDER BY LEFT(CAST(COALESCE(r.data_resposta, r.created_at) AS VARCHAR(10)), 7) DESC LIMIT {24 if (data_inicio and data_fim) else 6}
                 )
                 SELECT * FROM UltimosMeses ORDER BY mes ASC;
             """)
@@ -2077,6 +2094,7 @@ def get_dashboard_trend(
             
             labels = []
             scores = []
+            totais = []
             
             meses_pt = {'01':'Jan', '02':'Fev', '03':'Mar', '04':'Abr', '05':'Mai', '06':'Jun', 
                         '07':'Jul', '08':'Ago', '09':'Set', '10':'Out', '11':'Nov', '12':'Dez'}
@@ -2097,8 +2115,9 @@ def get_dashboard_trend(
                     
                 labels.append(mes_nome)
                 scores.append(nps)
+                totais.append(total)
 
-        return {"status": "success", "labels": labels, "scores": scores}
+        return {"status": "success", "labels": labels, "scores": scores, "totais": totais}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
@@ -4851,9 +4870,10 @@ def enviar_csat_manual(payload: EnvioCSAT, usuario_email: str = Depends(get_curr
 
 
 @app.get("/api/csat/resumo")
-def resumo_do_csat(dias: int = 90, usuario_email: str = Depends(get_current_user)):
+def resumo_do_csat(dias: int = 90, data_inicio: Optional[str] = None, data_fim: Optional[str] = None,
+                   companhia: Optional[str] = None, usuario_email: str = Depends(get_current_user)):
     from services.pesquisa_svc import resumo_csat
-    return resumo_csat(max(1, min(dias, 365)))
+    return resumo_csat(max(1, min(dias, 3650)), data_inicio, data_fim, companhia)
 
 
 @app.post("/api/integracao/csat")

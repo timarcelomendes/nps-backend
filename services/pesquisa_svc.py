@@ -282,17 +282,31 @@ def enviar_csat(email: str, nome: str = "", referencia: str = "", assunto: str =
     return {"status": status, "link": link, "token": token, "erro": erro, "formulario_id": form["id"]}
 
 
-def resumo_csat(dias: int = 90):
+def resumo_csat(dias: int = 90, data_inicio: str = None, data_fim: str = None, companhia: str = None):
+    """Resumo do CSAT. Usa o período informado (data_inicio/data_fim) ou os últimos `dias`."""
+    filtros, params = [], {}
+    if data_inicio and data_fim:
+        filtros.append("r.created_at >= :ini AND r.created_at <= :fim")
+        params.update(ini=f"{data_inicio} 00:00:00", fim=f"{data_fim} 23:59:59")
+    else:
+        filtros.append("r.created_at >= CURRENT_TIMESTAMP - make_interval(days => :d)")
+        params["d"] = dias
+    if companhia and companhia not in ("Todas as Companhias", "Todos os grupos"):
+        filtros.append("""COALESCE(r.empresa_id, c.empresa_id) IN (
+            SELECT e.id FROM dbo.nps_empresas e JOIN dbo.nps_companhias g ON g.id = e.companhia_id WHERE g.nome = :comp)""")
+        params["comp"] = companhia
+    where = " AND ".join(filtros)
+    base = f"FROM dbo.nps_csat_respostas r LEFT JOIN dbo.nps_clientes c ON c.cliente_id = r.cliente_id WHERE {where}"
     with get_engine().connect() as conn:
-        r = conn.execute(text("""
-            SELECT COUNT(*) AS total, ROUND(AVG(nota)::numeric, 2) AS media,
-                   ROUND(100.0 * SUM(CASE WHEN nota >= 4 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS satisfeitos_pct
-            FROM dbo.nps_csat_respostas WHERE created_at >= CURRENT_TIMESTAMP - make_interval(days => :d)
-        """), {"d": dias}).mappings().first()
-        ultimas = conn.execute(text("""
-            SELECT r.id, r.nota, r.comentario, r.referencia, r.assunto, r.created_at, COALESCE(c.nome, r.email::text) AS cliente
-            FROM dbo.nps_csat_respostas r LEFT JOIN dbo.nps_clientes c ON c.cliente_id = r.cliente_id
-            ORDER BY r.created_at DESC LIMIT 20
-        """)).mappings().all()
+        r = conn.execute(text(f"""
+            SELECT COUNT(*) AS total, ROUND(AVG(r.nota)::numeric, 2) AS media,
+                   ROUND(100.0 * SUM(CASE WHEN r.nota >= 4 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS satisfeitos_pct
+            {base}
+        """), params).mappings().first()
+        ultimas = conn.execute(text(f"""
+            SELECT r.id, r.nota, r.comentario, r.referencia, r.assunto, r.created_at,
+                   COALESCE(c.nome::text, r.email::text, 'Anônimo') AS cliente
+            {base} ORDER BY r.created_at DESC LIMIT 20
+        """), params).mappings().all()
     return {"total": r["total"], "media": float(r["media"] or 0), "satisfeitos_pct": float(r["satisfeitos_pct"] or 0),
             "ultimas": [dict(u) for u in ultimas]}
