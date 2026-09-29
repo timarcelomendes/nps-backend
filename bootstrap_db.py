@@ -70,6 +70,9 @@ def criar_configuracoes_padrao(conn, dominios: str = ""):
             VALUES (:c, :v, :d)
             ON CONFLICT (conta_id, chave) DO NOTHING
         """), {"c": chave, "v": valor, "d": descricao})
+    # formulários prontos (Pesquisa NPS e Satisfação pós-entrega) para quem ainda não tem
+    from services.formularios_svc import garantir_formularios_padrao
+    garantir_formularios_padrao(conn)
 
 
 def criar_usuario_admin(conn, nome: str, email: str, senha: str):

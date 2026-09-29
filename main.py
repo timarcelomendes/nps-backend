@@ -4798,8 +4798,10 @@ def progresso_primeiros_passos(usuario_email: str = Depends(get_current_user)):
 # 📝 FORMULÁRIO PRÓPRIO DE PESQUISA (NPS + CSAT)
 # ==========================================
 class RespostaPesquisa(BaseModel):
-    nota: int
+    respostas: Optional[dict] = None   # {id_da_pergunta: valor}
+    nota: Optional[int] = None         # formato antigo
     comentario: Optional[str] = ""
+    referencia: Optional[str] = ""     # link público: ?ref=... (ex.: loja, mesa, pedido)
 
 
 class EnvioCSAT(BaseModel):
@@ -4809,6 +4811,7 @@ class EnvioCSAT(BaseModel):
     referencia: Optional[str] = ""     # ex.: nº do pedido / da entrega
     assunto: Optional[str] = ""        # ex.: "a entrega do pedido 123"
     enviar_email: bool = True
+    formulario_id: Optional[int] = None  # opcional: usa o formulário padrão de CSAT
 
 
 @app.get("/api/pesquisa/{token}")
@@ -4826,7 +4829,7 @@ def pesquisa_publica(token: str, request: Request):
 @limiter.limit("10/minute")
 def responder_pesquisa_publica(token: str, payload: RespostaPesquisa, request: Request):
     from services.pesquisa_svc import registrar_resposta
-    ok, msg = registrar_resposta(token, payload.nota, payload.comentario or "")
+    ok, msg = registrar_resposta(token, respostas=payload.respostas, nota=payload.nota, comentario=payload.comentario or "")
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     return {"status": "success", "message": msg}
@@ -4836,7 +4839,7 @@ def _enviar_csat_ou_erro(payload: EnvioCSAT):
     from services.pesquisa_svc import enviar_csat
     try:
         return enviar_csat(payload.email, payload.nome, payload.referencia, payload.assunto,
-                           payload.telefone, payload.enviar_email)
+                           payload.telefone, payload.enviar_email, payload.formulario_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -4864,3 +4867,210 @@ def integracao_csat(payload: EnvioCSAT, request: Request):
         raise HTTPException(status_code=401, detail="Chave de API ausente ou inválida (cabeçalho X-Api-Key).")
     with _uc(conta_id):
         return _enviar_csat_ou_erro(payload)
+
+
+# ==========================================
+# 🧩 CONSTRUTOR DE FORMULÁRIOS
+# ==========================================
+from services import formularios_svc as _fs
+
+
+class FormularioCriar(BaseModel):
+    nome: Optional[str] = ""
+    modelo: Optional[str] = "em_branco"
+
+
+class FormularioSalvar(BaseModel):
+    nome: str
+    descricao: Optional[str] = ""
+    perguntas: list = []
+    tema: dict = {}
+    publico: bool = False
+    ativo: bool = True
+
+
+class FormularioPadrao(BaseModel):
+    uso: str  # 'nps' | 'csat'
+
+
+def _url_frontend():
+    return os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+
+def _form_ou_404(conn, form_id):
+    f = _fs.obter(conn, form_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="Formulário não encontrado.")
+    return f
+
+
+def _form_para_api(f, padroes):
+    return {
+        "id": f["id"], "nome": f["nome"], "descricao": f.get("descricao") or "", "tipo": f["tipo"],
+        "perguntas": f["perguntas"], "tema": dict(_fs.TEMA_PADRAO, **(f.get("tema") or {})),
+        "publico": bool(f["publico"]), "ativo": bool(f["ativo"]), "codigo": f["codigo"],
+        "link_publico": f"{_url_frontend()}/f/{f['codigo']}",
+        "padrao_nps": padroes.get("nps") == f["id"], "padrao_csat": padroes.get("csat") == f["id"],
+        "updated_at": f["updated_at"].isoformat() if f.get("updated_at") else None,
+    }
+
+
+def _padroes(conn):
+    return {"nps": _fs.id_padrao(conn, "nps"), "csat": _fs.id_padrao(conn, "csat")}
+
+
+@app.get("/api/formularios/modelos")
+def listar_modelos_formulario(usuario_email: str = Depends(get_current_user)):
+    return [{k: m[k] for k in ("chave", "nome", "descricao", "icone")} | {"qtd_perguntas": len([p for p in m["perguntas"] if p["tipo"] != "pagina"])}
+            for m in _fs.modelos()]
+
+
+@app.get("/api/formularios")
+def listar_formularios(incluir_arquivados: bool = False, usuario_email: str = Depends(get_current_user)):
+    with get_engine().connect() as conn:
+        padroes = _padroes(conn)
+        linhas = conn.execute(text(f"""
+            SELECT f.*, COALESCE(r.total, 0) AS respostas, r.ultima
+            FROM dbo.nps_formularios f
+            LEFT JOIN (SELECT formulario_id, COUNT(*) AS total, MAX(created_at) AS ultima
+                       FROM dbo.nps_formulario_respostas GROUP BY formulario_id) r ON r.formulario_id = f.id
+            {'' if incluir_arquivados else 'WHERE f.ativo = 1'}
+            ORDER BY f.ativo DESC, f.updated_at DESC
+        """)).mappings().all()
+    saida = []
+    for l in linhas:
+        f = _fs._linha_para_form(l)
+        item = _form_para_api(f, padroes)
+        item["qtd_perguntas"] = len([p for p in f["perguntas"] if p["tipo"] != "pagina"])
+        item["respostas"] = l["respostas"]
+        item["ultima_resposta"] = l["ultima"].isoformat() if l["ultima"] else None
+        saida.append(item)
+    return saida
+
+
+@app.post("/api/formularios")
+def criar_formulario(payload: FormularioCriar, usuario_email: str = Depends(get_current_user)):
+    m = _fs.modelo(payload.modelo or "em_branco") or _fs.modelo("em_branco")
+    try:
+        with get_engine().begin() as conn:
+            fid = _fs.criar(conn, (payload.nome or "").strip() or m["nome"], m["perguntas"], descricao=m["descricao"] if m["chave"] != "em_branco" else "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"id": fid}
+
+
+@app.get("/api/formularios/{form_id}")
+def obter_formulario(form_id: int, usuario_email: str = Depends(get_current_user)):
+    with get_engine().connect() as conn:
+        return _form_para_api(_form_ou_404(conn, form_id), _padroes(conn))
+
+
+@app.put("/api/formularios/{form_id}")
+def salvar_formulario(form_id: int, payload: FormularioSalvar, usuario_email: str = Depends(get_current_user)):
+    import json as _json
+    try:
+        perguntas = _fs.normalizar_perguntas(payload.perguntas)
+        tema = _fs.normalizar_tema(payload.tema)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not (payload.nome or "").strip():
+        raise HTTPException(status_code=400, detail="Dê um nome ao formulário.")
+    with get_engine().begin() as conn:
+        atual = _form_ou_404(conn, form_id)
+        padroes = _padroes(conn)
+        novo_tipo = _fs.tipo_do_formulario(perguntas)
+        for uso in ("nps", "csat"):
+            if padroes.get(uso) == form_id and (novo_tipo != uso or not payload.ativo):
+                raise HTTPException(status_code=400, detail=(
+                    f"Este é o formulário padrão de {uso.upper()}: ele precisa continuar ativo e com uma pergunta "
+                    f"{'de NPS (0 a 10)' if uso == 'nps' else 'de satisfação (CSAT ou estrelas)'}. "
+                    "Escolha outro formulário padrão antes."))
+        conn.execute(text("""
+            UPDATE dbo.nps_formularios SET nome = :n, descricao = :d, perguntas = CAST(:p AS JSONB), tema = CAST(:t AS JSONB),
+                   publico = :pub, ativo = :at, updated_at = CURRENT_TIMESTAMP WHERE id = :id
+        """), {"n": payload.nome.strip()[:150], "d": (payload.descricao or "")[:1000],
+               "p": _json.dumps(perguntas, ensure_ascii=False), "t": _json.dumps(tema, ensure_ascii=False),
+               "pub": 1 if payload.publico else 0, "at": 1 if payload.ativo else 0, "id": form_id})
+        return _form_para_api(_fs.obter(conn, form_id), _padroes(conn))
+
+
+@app.post("/api/formularios/{form_id}/duplicar")
+def duplicar_formulario(form_id: int, usuario_email: str = Depends(get_current_user)):
+    with get_engine().begin() as conn:
+        f = _form_ou_404(conn, form_id)
+        novo = _fs.criar(conn, f"{f['nome']} (cópia)"[:150], f["perguntas"], f.get("tema"), f.get("descricao") or "")
+    return {"id": novo}
+
+
+@app.delete("/api/formularios/{form_id}")
+def excluir_formulario(form_id: int, usuario_email: str = Depends(get_current_user)):
+    with get_engine().begin() as conn:
+        _form_ou_404(conn, form_id)
+        padroes = _padroes(conn)
+        if form_id in padroes.values():
+            raise HTTPException(status_code=400, detail="Este formulário é o padrão de envio. Escolha outro padrão antes de excluir.")
+        tem_respostas = conn.execute(text("SELECT 1 FROM dbo.nps_formulario_respostas WHERE formulario_id = :id LIMIT 1"), {"id": form_id}).scalar()
+        if tem_respostas:
+            conn.execute(text("UPDATE dbo.nps_formularios SET ativo = 0, publico = 0, updated_at = CURRENT_TIMESTAMP WHERE id = :id"), {"id": form_id})
+            return {"status": "arquivado", "message": "O formulário tinha respostas, então foi arquivado (as respostas foram mantidas)."}
+        conn.execute(text("UPDATE dbo.nps_disparos SET formulario_id = NULL WHERE formulario_id = :id"), {"id": form_id})
+        conn.execute(text("DELETE FROM dbo.nps_formularios WHERE id = :id"), {"id": form_id})
+    return {"status": "excluido", "message": "Formulário excluído."}
+
+
+@app.post("/api/formularios/{form_id}/padrao")
+def definir_formulario_padrao(form_id: int, payload: FormularioPadrao, usuario_email: str = Depends(get_current_user)):
+    if payload.uso not in ("nps", "csat"):
+        raise HTTPException(status_code=400, detail="Uso inválido.")
+    with get_engine().begin() as conn:
+        f = _form_ou_404(conn, form_id)
+        if not f["ativo"]:
+            raise HTTPException(status_code=400, detail="Reative o formulário antes de usá-lo nos envios.")
+        if f["tipo"] != payload.uso:
+            exigido = "uma pergunta de NPS (0 a 10)" if payload.uso == "nps" else "uma pergunta de satisfação (CSAT ou estrelas) e nenhuma de NPS"
+            raise HTTPException(status_code=400, detail=f"Para ser o padrão de {payload.uso.upper()}, o formulário precisa ter {exigido}.")
+        _fs.definir_padrao(conn, payload.uso, form_id)
+    return {"status": "success"}
+
+
+@app.get("/api/formularios/{form_id}/resultados")
+def resultados_formulario(form_id: int, dias: int = 90, usuario_email: str = Depends(get_current_user)):
+    with get_engine().connect() as conn:
+        f = _form_ou_404(conn, form_id)
+        r = _fs.resultados(conn, f, max(1, min(dias, 3650)))
+    registros = [{"id": x["id"], "data": x["created_at"].isoformat(), "cliente": x["cliente"], "email": x["email"],
+                  "referencia": x["referencia"], "nota": x["nota_principal"], "respostas": x["respostas"]}
+                 for x in r["registros"][:300]]
+    return {"total": r["total"], "perguntas": r["perguntas"], "registros": registros}
+
+
+@app.get("/api/formularios/{form_id}/resultados.csv")
+def exportar_resultados_formulario(form_id: int, dias: int = 365, usuario_email: str = Depends(get_current_user)):
+    from fastapi.responses import Response as _Resp
+    with get_engine().connect() as conn:
+        f = _form_ou_404(conn, form_id)
+        r = _fs.resultados(conn, f, max(1, min(dias, 3650)))
+    nome = re.sub(r"[^A-Za-z0-9_-]+", "-", f["nome"]).strip("-")[:40] or "formulario"
+    return _Resp(content=_fs.csv_resultados(f, r["registros"]), media_type="text/csv; charset=utf-8",
+                 headers={"Content-Disposition": f'attachment; filename="respostas-{nome}.csv"'})
+
+
+# ---- link público do formulário (/f/{codigo}), sem login
+@app.get("/api/pesquisa/f/{codigo}")
+@limiter.limit("30/minute")
+def formulario_publico(codigo: str, request: Request):
+    from services.pesquisa_svc import obter_formulario_publico
+    dados = obter_formulario_publico(codigo)
+    if not dados:
+        raise HTTPException(status_code=404, detail="Formulário não encontrado ou fora do ar.")
+    return dados
+
+
+@app.post("/api/pesquisa/f/{codigo}")
+@limiter.limit("5/minute")
+def responder_formulario_publico(codigo: str, payload: RespostaPesquisa, request: Request):
+    from services.pesquisa_svc import registrar_resposta_publica
+    ok, msg = registrar_resposta_publica(codigo, payload.respostas or {}, payload.referencia or "")
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success", "message": msg}

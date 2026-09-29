@@ -10,7 +10,7 @@ from jose import jwt
 from datetime import datetime, timedelta, timezone
 
 def registrar_log_disparo(email, nome, status, assunto, erro=None, cliente_id=None, empresa_id=None, url=None,
-                          token=None, tipo="nps", referencia=None, assunto_pesquisa=None):
+                          token=None, tipo="nps", referencia=None, assunto_pesquisa=None, formulario_id=None):
     """
     Função unificada para gravar qualquer disparo de e-mail na tabela nps_disparos.
     """
@@ -24,10 +24,10 @@ def registrar_log_disparo(email, nome, status, assunto, erro=None, cliente_id=No
             sql = text("""
                 INSERT INTO dbo.nps_disparos 
                 (cliente_id, empresa_id, nome, email, status, assunto, survey_url, erro_msg, data_envio_inicial, created_at, lembretes_enviados,
-                 token, tipo_pesquisa, referencia, assunto_pesquisa)
+                 token, tipo_pesquisa, referencia, assunto_pesquisa, formulario_id)
                 VALUES 
                 (:cid, :eid, :nome, :email, :status, :assunto, :url, :erro, GETDATE(), GETDATE(), 0,
-                 :token, :tipo, :ref, :assp)
+                 :token, :tipo, :ref, :assp, :fid)
             """)
             conn.execute(sql, {
                 "cid": cliente_id,
@@ -42,6 +42,7 @@ def registrar_log_disparo(email, nome, status, assunto, erro=None, cliente_id=No
                 "tipo": tipo or "nps",
                 "ref": referencia,
                 "assp": assunto_pesquisa,
+                "fid": formulario_id,
             })
     except Exception as e:
         # Deixa o erro evidente no console para debug rápido
@@ -57,16 +58,26 @@ def link_pesquisa_configurado(regras: dict) -> bool:
 
 def montar_convite_nps(regras: dict, cliente, template_customizado: str, campos_permitidos: list):
     """Monta link, HTML e assunto do convite de NPS.
-    Formulário próprio: link único /r/{token}. Externo: link configurado + parâmetros do cliente.
-    Retorna dict com url, html, assunto e token (None no externo)."""
-    from services.pesquisa_svc import usa_formulario_proprio, gerar_token, url_formulario, nome_da_conta, html_convite_nps, botoes_nps_html
+    Formulário próprio: link único /r/{token} com o formulário padrão de NPS da conta.
+    Externo: link configurado + parâmetros do cliente.
+    Retorna dict com url, html, assunto, token e formulario_id (None no externo)."""
+    from database import get_engine
+    from services import formularios_svc as fs
+    from services.pesquisa_svc import (usa_formulario_proprio, gerar_token, url_formulario, nome_da_conta,
+                                       html_convite_nps, html_convite_formulario, botoes_nps_html)
     nome_exibicao = cliente["nome"].split(" ")[0] if cliente["nome"] else "cliente"
     empresa_exibicao = cliente["empresa"] or "sua empresa"
     remetente = nome_da_conta()
-    token = None
+    token, form_id, render = None, None, None
     if usa_formulario_proprio(regras):
+        with get_engine().connect() as conn:
+            form_id = fs.id_padrao(conn, "nps")
+            form = fs.obter(conn, form_id) if form_id else None
+        if not form:
+            raise Exception("Nenhum formulário de NPS ativo. Crie um em Formulários.")
         token = gerar_token()
         survey_url = url_formulario(token)
+        render = fs.renderizar(form, {"empresa": remetente, "nome": nome_exibicao})
     else:
         params = {"clienteId": cliente["cliente_id"], "email": cliente["email"], "nome": cliente["nome"],
                   "empresa": cliente["empresa"] or "", "empresa_id": str(cliente["empresa_id"]) if cliente["empresa_id"] else ""}
@@ -74,14 +85,16 @@ def montar_convite_nps(regras: dict, cliente, template_customizado: str, campos_
         survey_url = montar_link_pesquisa(regras.get("survey_url"), query_string)
 
     if template_customizado and "{survey_url}" in template_customizado:
+        botoes = botoes_nps_html(survey_url) if render and render.get("principal_tipo") == "nps" else ""
         mail_html = (template_customizado.replace("{nome}", nome_exibicao).replace("{empresa}", empresa_exibicao)
-                     .replace("{botoes_nota}", botoes_nps_html(survey_url) if token else "")
-                     .replace("{survey_url}", survey_url))
+                     .replace("{botoes_nota}", botoes).replace("{survey_url}", survey_url))
+    elif render:
+        mail_html = html_convite_formulario(render, nome_exibicao, survey_url, remetente)
     else:
-        pergunta = str(regras.get("pergunta_nps") or "De 0 a 10, quanto você recomendaria a {empresa} a um amigo ou colega?").replace("{empresa}", remetente)
-        mail_html = html_convite_nps(nome_exibicao, survey_url, pergunta, remetente, com_botoes=bool(token))
+        pergunta = f"De 0 a 10, quanto você recomendaria a {remetente} a um amigo ou colega?"
+        mail_html = html_convite_nps(nome_exibicao, survey_url, pergunta, remetente, com_botoes=False)
 
-    return {"url": survey_url, "html": mail_html, "token": token, "nome": nome_exibicao,
+    return {"url": survey_url, "html": mail_html, "token": token, "nome": nome_exibicao, "formulario_id": form_id,
             "assunto": f"{remetente} quer saber a sua opinião"}
 
 
@@ -470,10 +483,10 @@ def processar_disparos_nps():
                     if resposta_ms.status_code in (200, 202):
                         sql_update = text("UPDATE dbo.nps_clientes SET status_envio = 'Enviado', ultimo_envio = CAST(GETDATE() AS DATE), proximo_envio = DATEADD('day', 90, CAST(GETDATE() AS DATE)), ultimo_erro = NULL, updated_at = SYSUTCDATETIME() WHERE cliente_id = :id")
                         conn.execute(sql_update, {"id": cliente["cliente_id"]})
-                        registrar_log_disparo(cliente["email"], nome_exibicao, "Enviado", payload["message"]["subject"], cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url, token=convite["token"])
+                        registrar_log_disparo(cliente["email"], nome_exibicao, "Enviado", payload["message"]["subject"], cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url, token=convite["token"], formulario_id=convite["formulario_id"])
                         enviados += 1
                     else:
-                        registrar_log_disparo(cliente["email"], nome_exibicao, "Erro", payload["message"]["subject"], erro=resposta_ms.text, cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url, token=convite["token"])
+                        registrar_log_disparo(cliente["email"], nome_exibicao, "Erro", payload["message"]["subject"], erro=resposta_ms.text, cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url, token=convite["token"], formulario_id=convite["formulario_id"])
                         raise Exception(f"Erro MS Graph: {resposta_ms.text}")
 
                 except Exception as erro_cliente:
@@ -540,9 +553,9 @@ def disparar_convite_nps_especifico(cliente_ids: list, dominio_origem: str = Non
                     
                     if resposta_ms.status_code in (200, 202):
                         conn.execute(text("UPDATE dbo.nps_clientes SET status_envio = 'Enviado', ultimo_envio = CAST(GETDATE() AS DATE), proximo_envio = DATEADD('day', 90, CAST(GETDATE() AS DATE)), ultimo_erro = NULL, updated_at = SYSUTCDATETIME() WHERE cliente_id = :id"), {"id": cliente["cliente_id"]})
-                        registrar_log_disparo(cliente["email"], nome_exibicao, "Enviado", payload["message"]["subject"], cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url, token=convite["token"])
+                        registrar_log_disparo(cliente["email"], nome_exibicao, "Enviado", payload["message"]["subject"], cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url, token=convite["token"], formulario_id=convite["formulario_id"])
                     else:
-                        registrar_log_disparo(cliente["email"], nome_exibicao, "Erro", payload["message"]["subject"], erro=resposta_ms.text, cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url, token=convite["token"])
+                        registrar_log_disparo(cliente["email"], nome_exibicao, "Erro", payload["message"]["subject"], erro=resposta_ms.text, cliente_id=cliente["cliente_id"], empresa_id=cliente["empresa_id"], url=survey_url, token=convite["token"], formulario_id=convite["formulario_id"])
                         raise Exception(f"Erro na API da Microsoft: {resposta_ms.text}")
 
                 except Exception as erro_cliente:
