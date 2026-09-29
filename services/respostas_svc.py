@@ -217,7 +217,13 @@ def processar_acao_automatica(resposta_id: str, nota: int, empresa_id: int, empr
                     gestor_id_encontrado = res.gestor_id
 
             prazo_limite = (datetime.now() + timedelta(days=dias_prazo)).strftime("%Y-%m-%d %H:%M:%S")
-            titulo = f"[{categoria} NPS {nota}] Ação Requerida: {empresa_nome or 'Cliente Indefinido'}"
+            quem = empresa_nome
+            if not quem:
+                quem = conn.execute(text("""
+                    SELECT COALESCE(c.nome::text, r.email::text) FROM dbo.nps_respostas r
+                    LEFT JOIN dbo.nps_clientes c ON c.cliente_id = r.cliente_id WHERE r.resposta_id = :rid
+                """), {"rid": resposta_id}).scalar()
+            titulo = f"[{categoria} NPS {nota}] Ação Requerida: {quem or 'Cliente não identificado'}"
             
             # ==========================================
             # 🧠 BUSCAR O HISTÓRICO DO CLIENTE
@@ -316,7 +322,7 @@ Comece a sua resposta exatamente com a frase: '🤖 Análise Rakiti AI:' e não 
         import traceback
         traceback.print_exc()
 
-def processar_webhook_fillout(payload: dict):
+def processar_webhook_fillout(payload: dict, canal: str = "Fillout"):
     """Recebe o JSON nativo do Fillout, grava a resposta e gera a ação no Kanban"""
     try:
         engine = get_engine()
@@ -391,7 +397,7 @@ def processar_webhook_fillout(payload: dict):
                     form_id, submission_id, created_at, expectativas, o_que_faltava
                 ) VALUES (
                     :rid, :cid, :email, :emp, :eid,
-                    CAST(GETDATE() AS DATE), :nota, :cat, :motivo, 'Fillout',
+                    CAST(GETDATE() AS DATE), :nota, :cat, :motivo, :canal,
                     :fid, :sub_id, SYSUTCDATETIME(), :exp, :falta
                 )
             """)
@@ -404,7 +410,7 @@ def processar_webhook_fillout(payload: dict):
 
             conn.execute(sql_insert, {
                 "rid": resposta_id, "cid": cid_valido, "email": email, "emp": empresa, "eid": empresa_id if empresa_id > 0 else None,
-                "nota": nota, "cat": categoria, "motivo": motivo,
+                "nota": nota, "cat": categoria, "motivo": motivo, "canal": canal,
                 "fid": form_id, "sub_id": submission_id, "exp": expectativas, "falta": o_que_faltava
             })
             

@@ -20,7 +20,10 @@ SCHEMA_FILE = PASTA_DB / "schema_postgres.sql"
 # Configurações padrão de toda conta nova
 CONFIGURACOES_PADRAO = [
     ("dominios_permitidos", "", "Domínios de e-mail que podem acessar (separados por vírgula)"),
-    ("survey_url", "", "Link do formulário de pesquisa (ex.: https://forms.fillout.com/t/SEU_FORM)"),
+    ("formulario_tipo", "proprio", "proprio = formulário da Rakiti | externo = link próprio (ex.: Fillout)"),
+    ("survey_url", "", "Link do formulário externo (usado só quando formulario_tipo = externo)"),
+    ("pergunta_nps", "De 0 a 10, quanto você recomendaria a {empresa} a um amigo ou colega?", "Pergunta principal do NPS"),
+    ("pergunta_csat", "Como você avalia {assunto}?", "Pergunta principal do CSAT"),
     ("recorrencia_dias", "90", "Intervalo entre pesquisas para o mesmo cliente"),
     ("envios_ativos", "0", "Liga/desliga o disparo automático de pesquisas"),
     ("robo_ativo", "0", "Liga/desliga o agendador"),

@@ -183,8 +183,9 @@ def _definir_conta_por_dominio(email: str):
 ROTAS_PUBLICAS = {
     "/api/login", "/api/register", "/api/reenviar-confirmacao", "/api/esqueci-senha",
     "/api/reset-password", "/api/auth/verificar-email", "/api/auth/sso-config",
-    "/api/auth/microsoft", "/api/webhook/fillout", "/api/status",
+    "/api/auth/microsoft", "/api/webhook/fillout", "/api/status", "/api/integracao/csat",
 }
+PREFIXOS_PUBLICOS = ("/api/pesquisa/",)  # formulário público de pesquisa (link com token)
 
 def _rota_so_admin(metodo: str, caminho: str) -> bool:
     if caminho.startswith("/api/admin/") or caminho == "/api/cadastros/corrigir-historico":
@@ -200,7 +201,8 @@ def _rota_so_admin(metodo: str, caminho: str) -> bool:
 @app.middleware("http")
 async def exigir_autenticacao(request: Request, call_next):
     caminho = request.url.path.rstrip("/") or "/"
-    if request.method == "OPTIONS" or not caminho.startswith("/api") or caminho in ROTAS_PUBLICAS:
+    if request.method == "OPTIONS" or not caminho.startswith("/api") or caminho in ROTAS_PUBLICAS \
+            or caminho.startswith(PREFIXOS_PUBLICOS):
         return await call_next(request)
     auth = request.headers.get("authorization", "")
     if not auth.lower().startswith("bearer "):
@@ -456,6 +458,9 @@ class RegrasNegocioConfig(BaseModel):
     recorrencia_dias: int = 90
     fillout_campos: str = "clienteid,email,nome,empresa,empresa_id"
     survey_url: Optional[str] = ""
+    formulario_tipo: str = "proprio"
+    pergunta_nps: Optional[str] = ""
+    pergunta_csat: Optional[str] = ""
     email_template_html: Optional[str] = ""
     email_agradecimento_promotor: Optional[str] = ""
     email_agradecimento_neutro: Optional[str] = ""
@@ -582,6 +587,9 @@ def obter_regras(usuario_email: str = Depends(get_current_user)):
 @app.post("/api/config/regras")
 def salvar_regras(payload: RegrasNegocioConfig, usuario_email: str = Depends(get_current_user)):
     payload.survey_url = (payload.survey_url or "").strip()
+    payload.formulario_tipo = "externo" if payload.formulario_tipo == "externo" else "proprio"
+    if payload.formulario_tipo == "externo" and not payload.survey_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Para usar um formulário externo, informe o link (começando com https://).")
     if payload.survey_url and not payload.survey_url.startswith("https://"):
         raise HTTPException(status_code=400, detail="O link do formulário de pesquisa precisa começar com https://")
     try:
@@ -639,10 +647,12 @@ def testar_template_html(payload: TesteTemplatePayload, usuario_email: str = Dep
             raise HTTPException(status_code=400, detail="A caixa de texto do HTML está vazia.")
 
         if payload.categoria == 'convite':
+            from services.pesquisa_svc import botoes_nps_html
             assunto_teste = "[Rakiti Teste] Preview do Convite NPS"
             html_pronto = payload.html_content.replace("{nome}", "Maria (Teste)") \
                                               .replace("{empresa}", "Empresa Fictícia S/A") \
-                                              .replace("{survey_url}", "https://forms.fillout.com/t/preview123456789")
+                                              .replace("{botoes_nota}", botoes_nps_html("https://rakiti.com/r/exemplo")) \
+                                              .replace("{survey_url}", "https://rakiti.com/r/exemplo")
         else:
             assunto_teste = f"[Rakiti Teste] Preview do Layout — {payload.categoria.capitalize()}"
             nota_teste = "10" if payload.categoria == 'promotor' else "7" if payload.categoria == 'neutro' else "3"
@@ -4639,7 +4649,7 @@ def listar_logs_emails():
                     CASE 
                         WHEN survey_url LIKE '%verificar-email%' THEN 'Verificação de Conta'
                         WHEN survey_url LIKE '%redefinir-senha%' THEN 'Recuperação de Acesso'
-                        WHEN survey_url LIKE '%fillout%' THEN 'Convite de Pesquisa NPS'
+                        WHEN survey_url LIKE '%fillout%' OR survey_url LIKE '%/r/%' THEN 'Convite de Pesquisa NPS'
                         ELSE 'Notificação de Sistema' 
                     END
                 ) as assunto, 
@@ -4698,6 +4708,8 @@ def dados_da_conta(request: Request, usuario_email: str = Depends(get_current_us
         "nome": conta["nome"],
         "plano": conta["plano"],
         "webhook_url": f"{_url_publica_api(request)}/api/webhook/fillout?token={conta['webhook_token']}",
+        "csat_api_url": f"{_url_publica_api(request)}/api/integracao/csat",
+        "api_key": conta["webhook_token"],
     }
 
 
@@ -4764,13 +4776,13 @@ def progresso_primeiros_passos(usuario_email: str = Depends(get_current_user)):
     """Progresso do guia de primeiro acesso da conta."""
     with get_engine().connect() as conn:
         cfg = {r[0]: r[1] for r in conn.execute(text(
-            "SELECT chave, valor FROM dbo.nps_configuracoes WHERE chave IN ('survey_url', 'envios_ativos')"))}
+            "SELECT chave, valor FROM dbo.nps_configuracoes WHERE chave IN ('survey_url', 'envios_ativos', 'formulario_tipo')"))}
         clientes = conn.execute(text("SELECT COUNT(*) FROM dbo.nps_clientes")).scalar() or 0
         respostas = conn.execute(text("SELECT COUNT(*) FROM dbo.nps_respostas WHERE excluido = 0 OR excluido IS NULL")).scalar() or 0
-        disparos = conn.execute(text("SELECT COUNT(*) FROM dbo.nps_disparos WHERE status = 'Enviado'")).scalar() or 0
+        disparos = conn.execute(text("SELECT COUNT(*) FROM dbo.nps_disparos WHERE status IN ('Enviado', 'Respondido')")).scalar() or 0
     passos = {
         "clientes": clientes > 0,
-        "formulario": str(cfg.get("survey_url") or "").startswith("https://"),
+        "formulario": str(cfg.get("formulario_tipo") or "proprio") != "externo" or str(cfg.get("survey_url") or "").startswith("https://"),
         "envio": disparos > 0,
         "respostas": respostas > 0,
     }
@@ -4780,3 +4792,75 @@ def progresso_primeiros_passos(usuario_email: str = Depends(get_current_user)):
         "totais": {"clientes": clientes, "respostas": respostas, "disparos": disparos},
         "envios_ativos": str(cfg.get("envios_ativos") or "").lower() in ("true", "1"),
     }
+
+
+# ==========================================
+# 📝 FORMULÁRIO PRÓPRIO DE PESQUISA (NPS + CSAT)
+# ==========================================
+class RespostaPesquisa(BaseModel):
+    nota: int
+    comentario: Optional[str] = ""
+
+
+class EnvioCSAT(BaseModel):
+    email: Optional[str] = ""
+    nome: Optional[str] = ""
+    telefone: Optional[str] = ""
+    referencia: Optional[str] = ""     # ex.: nº do pedido / da entrega
+    assunto: Optional[str] = ""        # ex.: "a entrega do pedido 123"
+    enviar_email: bool = True
+
+
+@app.get("/api/pesquisa/{token}")
+@limiter.limit("30/minute")
+def pesquisa_publica(token: str, request: Request):
+    """Dados do formulário público (sem login)."""
+    from services.pesquisa_svc import obter_pesquisa
+    dados = obter_pesquisa(token)
+    if not dados:
+        raise HTTPException(status_code=404, detail="Pesquisa não encontrada. Confira o link recebido.")
+    return dados
+
+
+@app.post("/api/pesquisa/{token}")
+@limiter.limit("10/minute")
+def responder_pesquisa_publica(token: str, payload: RespostaPesquisa, request: Request):
+    from services.pesquisa_svc import registrar_resposta
+    ok, msg = registrar_resposta(token, payload.nota, payload.comentario or "")
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success", "message": msg}
+
+
+def _enviar_csat_ou_erro(payload: EnvioCSAT):
+    from services.pesquisa_svc import enviar_csat
+    try:
+        return enviar_csat(payload.email, payload.nome, payload.referencia, payload.assunto,
+                           payload.telefone, payload.enviar_email)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/csat/enviar")
+def enviar_csat_manual(payload: EnvioCSAT, usuario_email: str = Depends(get_current_user)):
+    """Envia (ou gera o link de) uma pesquisa de satisfação CSAT pela tela."""
+    return _enviar_csat_ou_erro(payload)
+
+
+@app.get("/api/csat/resumo")
+def resumo_do_csat(dias: int = 90, usuario_email: str = Depends(get_current_user)):
+    from services.pesquisa_svc import resumo_csat
+    return resumo_csat(max(1, min(dias, 365)))
+
+
+@app.post("/api/integracao/csat")
+@limiter.limit("120/minute")
+def integracao_csat(payload: EnvioCSAT, request: Request):
+    """Para o sistema do cliente (ERP/TMS) disparar CSAT após uma entrega ou atendimento.
+    Autenticação: cabeçalho X-Api-Key com a chave da conta (a mesma do webhook)."""
+    from database import usando_conta as _uc
+    conta_id = _conta_por_webhook_token(request.headers.get("x-api-key", "").strip())
+    if conta_id is None:
+        raise HTTPException(status_code=401, detail="Chave de API ausente ou inválida (cabeçalho X-Api-Key).")
+    with _uc(conta_id):
+        return _enviar_csat_ou_erro(payload)
