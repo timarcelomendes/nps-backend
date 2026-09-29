@@ -128,7 +128,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 # ==========================================
-# 🚀 REGISTO DE ROUTERS (Coloque Aqui)
+# 🚀 REGISTRO DE ROUTERS (Coloque Aqui)
 # ==========================================
 app.include_router(chat.router, prefix="/api")
 
@@ -587,7 +587,7 @@ def salvar_regras(payload: RegrasNegocioConfig, usuario_email: str = Depends(get
     try:
         engine = get_engine()
         with engine.begin() as conn:
-            # Busca o ID do utilizador logado para o log
+            # Busca o ID do usuário logado para o log
             uid = conn.execute(text("SELECT usuario_id FROM dbo.nps_usuarios WHERE email = :e"), {"e": usuario_email}).scalar()
 
             # --- AUDITORIA: VERIFICA SE O ROBÔ LIGOU OU DESLIGOU ---
@@ -598,7 +598,7 @@ def salvar_regras(payload: RegrasNegocioConfig, usuario_email: str = Depends(get
             if str(estado_robo_antigo).lower() != novo_robo_str:
                 registrar_log(
                     acao="CONFIG_ROBO",
-                    mensagem=f"O utilizador {'ATIVOU' if payload.robo_ativo else 'DESATIVOU'} o Robô Automático (Background).",
+                    mensagem=f"O usuário {'ATIVOU' if payload.robo_ativo else 'DESATIVOU'} o Robô Automático (Background).",
                     nivel="WARN",
                     usuario_id=uid
                 )
@@ -619,7 +619,7 @@ def salvar_regras(payload: RegrasNegocioConfig, usuario_email: str = Depends(get
                 
                 conn.execute(sql, {"chave": chave, "valor": valor_string})
             
-        return {"message": "Regras de negócio guardadas com sucesso!"}
+        return {"message": "Regras de negócio salvas com sucesso!"}
     except Exception as e:
         print(f"Erro ao salvar regras chave-valor: {e}")
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
@@ -646,9 +646,9 @@ def testar_template_html(payload: TesteTemplatePayload, usuario_email: str = Dep
         else:
             assunto_teste = f"[Rakiti Teste] Preview do Layout — {payload.categoria.capitalize()}"
             nota_teste = "10" if payload.categoria == 'promotor' else "7" if payload.categoria == 'neutro' else "3"
-            motivo_teste = "A equipa foi fantástica, mas acho que o portal poderia ser mais intuitivo."
+            motivo_teste = "A equipe foi fantástica, mas acho que o portal poderia ser mais intuitivo."
             exp_teste = "Sim, o atendimento atendeu às expectativas."
-            falta_teste = "Faltou apenas um manual de utilizador mais detalhado."
+            falta_teste = "Faltou apenas um manual de usuário mais detalhado."
             
             html_pronto = payload.html_content.replace("{nome}", "João (Teste)") \
                                               .replace("{empresa}", "Empresa Fictícia S/A") \
@@ -690,7 +690,7 @@ def testar_template_html(payload: TesteTemplatePayload, usuario_email: str = Dep
 async def login(requisicao: LoginRequest, request: Request):
     try:
         if _definir_conta_por_email(requisicao.email) is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Este e-mail não está registado na plataforma.")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Este e-mail não está cadastrado na plataforma.")
         engine = get_engine()
         with engine.connect() as conn:
             validar_dominio_email(requisicao.email, conn)
@@ -705,7 +705,7 @@ async def login(requisicao: LoginRequest, request: Request):
             if not resultado:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED, 
-                    detail="Este e-mail não está registado na plataforma."
+                    detail="Este e-mail não está cadastrado na plataforma."
                 )
 
             if not resultado["email_verificado"]:
@@ -737,7 +737,7 @@ async def login(requisicao: LoginRequest, request: Request):
             if not senha_correta:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED, 
-                    detail="A palavra-passe digitada está incorreta."
+                    detail="A senha digitada está incorreta."
                 )
 
             user_agent = request.headers.get("user-agent", "Dispositivo Desconhecido")
@@ -773,7 +773,7 @@ async def login(requisicao: LoginRequest, request: Request):
             else:
                 conn.execute(text("""
                     INSERT INTO dbo.nps_sessoes_ativas (usuario_id, dispositivo, ip_address, localizacao, criado_em, revogado)
-                    VALUES (:uid, :disp, :ip, 'Detetado Automaticamente', :agora, 0)
+                    VALUES (:uid, :disp, :ip, 'Detectado Automaticamente', :agora, 0)
                 """), {
                     "uid": resultado["usuario_id"],
                     "disp": dispositivo_amigavel,
@@ -845,7 +845,7 @@ async def login(requisicao: LoginRequest, request: Request):
         print(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail="Erro interno no servidor. A equipa técnica já foi notificada."
+            detail="Erro interno no servidor. A equipe técnica já foi notificada."
         )
     
 @app.post("/api/reenviar-confirmacao")
@@ -983,7 +983,7 @@ async def login_microsoft(payload: MicrosoftAuthPayload, request: Request):
             conn.execute(text("""
                 INSERT INTO dbo.nps_sessoes_ativas 
                 (usuario_id, token_id, dispositivo, ip_address, localizacao, criado_em, ultima_atividade, revogado) 
-                VALUES (:uid, :tid, :disp, :ip, 'Detetado Automaticamente', :agora, :agora, 0)
+                VALUES (:uid, :tid, :disp, :ip, 'Detectado Automaticamente', :agora, :agora, 0)
             """), {"uid": user_db["usuario_id"], "tid": novo_token_id, "ip": ip_usuario, "disp": user_agent, "agora": agora_utc})
 
             sql_perm = text("SELECT chave FROM dbo.nps_permissoes WHERE perfil = :perfil")
@@ -1091,25 +1091,25 @@ async def resetar_senha(
             })
             
             if resultado.rowcount == 0:
-                raise HTTPException(status_code=404, detail="Utilizador não encontrado.")
+                raise HTTPException(status_code=404, detail="Usuário não encontrado.")
             
             res_user = conn.execute(
                 text("SELECT nome FROM dbo.nps_usuarios WHERE email = :email"),
                 {"email": email_usuario}
             ).mappings().first()
             
-            nome_usuario = res_user['nome'] if res_user else "Utilizador"
+            nome_usuario = res_user['nome'] if res_user else "Usuário"
 
         from services.email_svc import enviar_email_senha_alterada
         background_tasks.add_task(_bg(enviar_email_senha_alterada), email_usuario, nome_usuario)
             
-        return {"status": "success", "message": "Palavra-passe alterada com sucesso!"}
+        return {"status": "success", "message": "Senha alterada com sucesso!"}
             
     except HTTPException: raise
     except Exception as e:
-        enviar_alerta_tecnico_teams(f"Falha ao atualizar a Hash de Palavra-passe no BD: {str(e)}")
-        print(f"❌ Erro ao redefinir a palavra-passe no banco: {e}")
-        raise HTTPException(status_code=500, detail="Erro interno ao guardar a nova palavra-passe.")
+        enviar_alerta_tecnico_teams(f"Falha ao atualizar a Hash de Senha no BD: {str(e)}")
+        print(f"❌ Erro ao redefinir a senha no banco: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao salvar a nova senha.")
 
 @app.post("/api/esqueci-senha")
 @limiter.limit("3/minute")
@@ -1186,7 +1186,7 @@ async def reset_manual_senha(usuario_id: str):
 
 @app.delete("/api/usuarios/{usuario_id}")
 def excluir_usuario(usuario_id: str, admin_email: str = Depends(exigir_admin)):
-    """Exclui um utilizador do sistema (Apenas Administradores)"""
+    """Exclui um usuário do sistema (Apenas Administradores)"""
     try:
         engine = get_engine()
         
@@ -1203,7 +1203,7 @@ def excluir_usuario(usuario_id: str, admin_email: str = Depends(exigir_admin)):
             if str(usuario_id) == str(admin_id):
                 raise HTTPException(status_code=400, detail="Operação bloqueada: Você não pode excluir a sua própria conta.")
 
-            # 3. Verifica qual é o tipo de conta que estamos a tentar excluir
+            # 3. Verifica qual é o tipo de conta que estamos tentando excluir
             usuario_alvo = conn.execute(
                 text("SELECT tipo FROM dbo.nps_usuarios WHERE usuario_id = :id"),
                 {"id": usuario_id}
@@ -1332,17 +1332,18 @@ async def get_magic_ai_insights():
         
         # 1. Puxa as configurações diretamente do Banco de Dados
         with engine.connect() as conn:
-            api_key = conn.execute(text("SELECT valor FROM dbo.nps_configuracoes WHERE chave = 'openai_api_key'")).scalar()
+            from services.config_svc import ia_disponivel, registrar_uso_ia
+            api_key, msg_ia = ia_disponivel()
             ai_model = conn.execute(text("SELECT valor FROM dbo.nps_configuracoes WHERE chave = 'openai_model'")).scalar() or "gpt-4o-mini"
             ai_temp = conn.execute(text("SELECT valor FROM dbo.nps_configuracoes WHERE chave = 'ai_temperature'")).scalar() or "0.4"
             
-            if not api_key or api_key.strip() == "":
+            if not api_key:
                 return {
                     "status": "success", 
                     "insights": {
                         "arder": "Atenção necessária:",
-                        "amar": "A funcionalidade de Inteligência Artificial está adormecida.",
-                        "recomendacao": "Vá ao menu Definições > Inteligência Artificial e insira a sua chave da OpenAI."
+                        "amar": "A análise por inteligência artificial não está disponível agora.",
+                        "recomendacao": msg_ia
                     }
                 }
 
@@ -1363,8 +1364,9 @@ async def get_magic_ai_insights():
 
         # 3. Executa a IA com os parâmetros dinâmicos do Banco
         client = openai.OpenAI(api_key=api_key.strip())
+        registrar_uso_ia()
         prompt_sistema = f"""
-        Atue como um Consultor Executivo de CX. Analise estes feedbacks:
+        Atue como um Consultor Executivo de CX. Responda em português do Brasil, com linguagem simples para pequenas e médias empresas. Analise estes feedbacks:
         {texto_para_ia}
         
         Forneça um resumo executivo com exatamente 3 pontos em formato JSON estrito:
@@ -1438,7 +1440,7 @@ def _enviar_alerta_gestor(cfg, access_token, empresa, gestor_nome, gestor_email,
         </div>
         <div style="padding: 20px; color: #333;">
             <p>Olá <strong>{gestor_nome}</strong>,</p>
-            <p>O cliente <strong>{empresa}</strong> registou um NPS crítico de <strong>{nps} pts</strong>.</p>
+            <p>O cliente <strong>{empresa}</strong> cadastrou um NPS crítico de <strong>{nps} pts</strong>.</p>
             <p style="color: #be123c; font-weight: bold;">Ação de retenção aconselhada nas próximas 24h.</p>
         </div>
     </div>
@@ -1488,7 +1490,7 @@ def criar_usuario(usuario: UsuarioCreate):
         existe = conn.execute(check_query, {"email": usuario.email}).fetchone()
         
         if existe:
-            raise HTTPException(status_code=400, detail="Este e-mail já está registado no sistema.")
+            raise HTTPException(status_code=400, detail="Este e-mail já está cadastrado no sistema.")
         
         bytes_senha = usuario.password.encode('utf-8')
         salt = bcrypt.gensalt()
@@ -1566,7 +1568,7 @@ def get_dashboard_kpis(
             parametros["apenas_ativos"] = 1 if apenas_ativos else 0
             filtros_sql.append("(:apenas_ativos = 0 OR e.ativo = 1)")
             
-            if companhia and companhia != "Todas as Companhias":
+            if companhia and companhia not in ("Todas as Companhias", "Todos os grupos"):
                 filtros_sql.append("e.companhia_id IN (SELECT id FROM dbo.nps_companhias WHERE nome = :companhia)")
                 parametros["companhia"] = companhia
             
@@ -1745,7 +1747,7 @@ def get_dashboard_kpis(
             params_ant["apenas_ativos"] = 1 if apenas_ativos else 0
             filtros_sql_ant.append("(:apenas_ativos = 0 OR e.ativo = 1)")
             
-            if companhia and companhia != "Todas as Companhias":
+            if companhia and companhia not in ("Todas as Companhias", "Todos os grupos"):
                 filtros_sql_ant.append("e.companhia_id IN (SELECT id FROM dbo.nps_companhias WHERE nome = :companhia)")
                 params_ant["companhia"] = companhia
             
@@ -1912,7 +1914,7 @@ def get_dashboard_detalhes(
 
             params["apenas_ativos"] = 1 if apenas_ativos else 0
 
-            if companhia and companhia != "Todas as Companhias":
+            if companhia and companhia not in ("Todas as Companhias", "Todos os grupos"):
                 filtros_sql_c.append("e.companhia_id IN (SELECT id FROM dbo.nps_companhias WHERE nome = :companhia)")
                 filtros_sql_puro.append("empresa_id IN (SELECT id FROM dbo.nps_empresas WHERE companhia_id IN (SELECT id FROM dbo.nps_companhias WHERE nome = :companhia))")
                 params["companhia"] = companhia
@@ -2025,7 +2027,7 @@ def get_dashboard_trend(
             params["apenas_ativos"] = 1 if apenas_ativos else 0
             filtros_sql.append("(:apenas_ativos = 0 OR e.ativo = 1 OR COALESCE(r.empresa_id, c.empresa_id) IS NULL)")
             
-            if companhia and companhia != "Todas as Companhias":
+            if companhia and companhia not in ("Todas as Companhias", "Todos os grupos"):
                 filtros_sql.append("e.companhia_id IN (SELECT id FROM dbo.nps_companhias WHERE nome = :companhia)")
                 params["companhia"] = companhia
                 
@@ -2107,7 +2109,7 @@ def get_nuvem_palavras(
             params["apenas_ativos"] = 1 if apenas_ativos else 0
             filtros_sql.append("(:apenas_ativos = 0 OR e.ativo = 1)")
             
-            if companhia and companhia != "Todas as Companhias":
+            if companhia and companhia not in ("Todas as Companhias", "Todos os grupos"):
                 filtros_sql.append("e.companhia_id IN (SELECT id FROM dbo.nps_companhias WHERE nome = :companhia)")
                 params["companhia"] = companhia
                 
@@ -2170,7 +2172,7 @@ def exportar_dashboard(
             parametros["apenas_ativos"] = 1 if apenas_ativos else 0
             filtros_sql.append("(:apenas_ativos = 0 OR e.ativo = 1)")
             
-            if companhia and companhia != "Todas as Companhias":
+            if companhia and companhia not in ("Todas as Companhias", "Todos os grupos"):
                 filtros_sql.append("e.companhia_id IN (SELECT id FROM dbo.nps_companhias WHERE nome = :companhia)")
                 parametros["companhia"] = companhia
                 
@@ -2226,7 +2228,7 @@ def exportar_dashboard(
 
     except Exception as e:
         print(f"Erro Exportação: {str(e)}")
-        raise HTTPException(status_code=500, detail="Falha ao gerar o ficheiro.")
+        raise HTTPException(status_code=500, detail="Falha ao gerar o arquivo.")
         
 @app.get("/api/dashboard/companhias")
 def get_lista_companhias():
@@ -2236,10 +2238,10 @@ def get_lista_companhias():
             sql = text("SELECT nome FROM dbo.nps_companhias ORDER BY nome")
             resultados = conn.execute(sql).scalars().all()
             
-            return ["Todas as Companhias"] + list(resultados)
+            return ["Todos os grupos"] + list(resultados)
     except Exception as e:
         print(f"Erro ao buscar companhias: {e}")
-        return ["Todas as Companhias"]
+        return ["Todos os grupos"]
     
 # ==========================================
 # 🏢 ROTAS: EMPRESAS, SEGMENTOS E PERFIS
@@ -2420,7 +2422,7 @@ def save_empresa(emp: EmpresaSchema):
                 "s": emp.segmento, 
                 "v": emp.valor_contrato, 
                 "g": emp.gestor,
-                "gid": emp.gestor_id, # 👈 O ID agora é guardado!
+                "gid": emp.gestor_id, # 👈 O ID agora é salvo!
                 "cid": emp.companhia_id
             })
         return {"status": "success", "message": "Empresa cadastrada"}
@@ -2523,7 +2525,7 @@ def forcar_envio_nps(cliente_id: str, request: Request, background_tasks: Backgr
         
         return {
             "status": "success", 
-            "message": "Solicitação recebida! O e-mail está a ser despachado agora mesmo."
+            "message": "Solicitação recebida! O e-mail está sendo despachado agora mesmo."
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail="Não conseguimos processar o envio manual.")
@@ -2616,7 +2618,7 @@ def update_cliente_route(cliente_id: str, payload: ClienteUpdate):
     except IntegrityError as e:
         error_msg = str(e)
         if "UQ_nps_clientes_email" in error_msg or "duplicate key" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Este e-mail já está registado para outro cliente.")
+            raise HTTPException(status_code=400, detail="Este e-mail já está cadastrado para outro cliente.")
         raise HTTPException(status_code=400, detail="Erro de restrição no banco de dados.")
     except Exception as e:
         import traceback
@@ -2927,7 +2929,7 @@ async def preview_importacao(file: UploadFile = File(...)):
                 conteudo_texto = contents.decode('latin1').strip()
                 
             if not conteudo_texto:
-                raise ValueError("O ficheiro está vazio ou só contém linhas em branco.")
+                raise ValueError("O arquivo está vazio ou só contém linhas em branco.")
 
             df = pd.read_csv(io.StringIO(conteudo_texto), sep=None, engine='python')
         
@@ -3369,7 +3371,7 @@ async def atualizar_usuario(usuario_id: str, data: dict, admin_email: str = Depe
     try:
         engine = get_engine()
         with engine.begin() as conn:
-            # Busca o ID do Admin que está a aprovar
+            # Busca o ID do Admin que está aprovando
             admin_id = conn.execute(text("SELECT usuario_id FROM dbo.nps_usuarios WHERE email = :e"), {"e": admin_email}).scalar()
 
             query = text("""
@@ -3391,12 +3393,12 @@ async def atualizar_usuario(usuario_id: str, data: dict, admin_email: str = Depe
             if str(data.get("ativo")) in ['1', 'true', 'True']:
                 registrar_log(
                     acao="APROVACAO_USUARIO",
-                    mensagem=f"O utilizador {data.get('email')} teve o seu acesso aprovado/ativado.",
+                    mensagem=f"O usuário {data.get('email')} teve o seu acesso aprovado/ativado.",
                     nivel="SUCCESS",
                     usuario_id=admin_id
                 )
 
-        return {"mensagem": "Utilizador atualizado com sucesso"}
+        return {"mensagem": "Usuário atualizado com sucesso"}
     except Exception as e:
         print(f"Erro ao atualizar: {e}")
         raise HTTPException(status_code=500, detail="Erro ao atualizar no banco")
@@ -3477,7 +3479,7 @@ async def salvar_config_email(config: ConfigEmailSchema, admin_email: str = Depe
                 """), {
                     "t": config.tenant_id, 
                     "c": config.client_id, 
-                    "s": secret_protegido, # 🛡️ Valor encriptado ou vazio
+                    "s": secret_protegido, # 🛡️ Valor criptografado ou vazio
                     "e": config.email_remetente, 
                     "b": config.base_url_frontend
                 })
@@ -3504,7 +3506,7 @@ async def salvar_config_email(config: ConfigEmailSchema, admin_email: str = Depe
             estado_motor = conn.execute(text("SELECT valor FROM dbo.nps_configuracoes WHERE chave = 'envios_ativos'")).scalar()
             novo_motor = 'true' if config.envios_ativos else 'false'
             if estado_motor != novo_motor:
-                registrar_log(acao="CONFIG_MOTOR", mensagem=f"O utilizador {'ATIVOU' if config.envios_ativos else 'DESATIVOU'} o Motor.", nivel="WARN", usuario_id=admin_id)
+                registrar_log(acao="CONFIG_MOTOR", mensagem=f"O usuário {'ATIVOU' if config.envios_ativos else 'DESATIVOU'} o Motor.", nivel="WARN", usuario_id=admin_id)
             conn.execute(sql_upsert_cfg, {"chave": "envios_ativos", "valor": novo_motor})
 
             # Toggle: Robô
@@ -3512,7 +3514,7 @@ async def salvar_config_email(config: ConfigEmailSchema, admin_email: str = Depe
             novo_robo_bool = getattr(config, 'robo_ativo', False)
             novo_robo = 'true' if novo_robo_bool else 'false'
             if estado_robo != novo_robo:
-                registrar_log(acao="CONFIG_ROBO", mensagem=f"O utilizador {'ATIVOU' if novo_robo_bool else 'DESATIVOU'} o Robô.", nivel="WARN", usuario_id=admin_id)
+                registrar_log(acao="CONFIG_ROBO", mensagem=f"O usuário {'ATIVOU' if novo_robo_bool else 'DESATIVOU'} o Robô.", nivel="WARN", usuario_id=admin_id)
             conn.execute(sql_upsert_cfg, {"chave": "robo_ativo", "valor": novo_robo})
 
             # SSO
@@ -3565,7 +3567,7 @@ async def autorizar_microsoft(requisicao: AutorizarEmailRequest):
             print(f"❌ Erro Microsoft: {res}") 
             raise HTTPException(status_code=400, detail=res.get("error_description", "Falha no token"))
 
-        # 🎯 ENCRIPTOGRAFIA: Protegemos o token devolvido antes de o guardar no SQL
+        # 🎯 ENCRIPTOGRAFIA: Protegemos o token devolvido antes de o salvar no SQL
         token_protegido = encrypt_data(res["refresh_token"])
 
         with engine.begin() as conn_tx:
@@ -3732,10 +3734,10 @@ async def upload_meu_avatar(file: UploadFile = File(...), usuario_email: str = D
     try:
         engine = get_engine()
         with engine.begin() as conn:
-            # 1. Busca dados do utilizador
+            # 1. Busca dados do usuário
             user = conn.execute(text("SELECT usuario_id, avatar_url FROM dbo.nps_usuarios WHERE email = :e"), {"e": usuario_email}).mappings().first()
             if not user:
-                raise HTTPException(status_code=404, detail="Utilizador não encontrado.")
+                raise HTTPException(status_code=404, detail="Usuário não encontrado.")
 
             # 2. Pasta de destino
             AVATAR_PATH = "uploads/avatars"
@@ -3746,13 +3748,13 @@ async def upload_meu_avatar(file: UploadFile = File(...), usuario_email: str = D
             novo_nome = f"avatar_{user['usuario_id']}_{uuid.uuid4().hex}{ext}"
             caminho_fisico = os.path.join(AVATAR_PATH, novo_nome)
 
-            # 4. Grava o ficheiro no disco
+            # 4. Grava o arquivo no disco
             with open(caminho_fisico, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
             # 5. Limpeza da foto antiga (Lógica melhorada para caminhos relativos ou absolutos)
             if user.get('avatar_url'):
-                # Extrai apenas o nome do ficheiro, ignorando se era localhost ou relativo
+                # Extrai apenas o nome do arquivo, ignorando se era localhost ou relativo
                 foto_antiga = user['avatar_url'].split('/')[-1]
                 caminho_antigo = os.path.join(AVATAR_PATH, foto_antiga)
                 if os.path.exists(caminho_antigo):
@@ -3867,7 +3869,7 @@ def salvar_configuracoes_seguranca(payload: SegurancaConfig, usuario_email: str 
         return {"status": "success", "message": "Tempo de sessão atualizado com sucesso!"}
     except Exception as e:
         print(f"Erro ao salvar configuração de segurança: {e}")
-        raise HTTPException(status_code=500, detail="Erro ao guardar configurações de segurança.")
+        raise HTTPException(status_code=500, detail="Erro ao salvar configurações de segurança.")
 
 # ==========================================
 # 🛠️ FUNÇÃO AUXILIAR: MONTADOR DE FILTROS SQL
@@ -4103,12 +4105,13 @@ async def get_bi_ia_reports(periodo: str = Query("Últimos 6 Meses"), segmento: 
         
         engine = get_engine()
         with engine.connect() as conn:
-            api_key = conn.execute(text("SELECT valor FROM dbo.nps_configuracoes WHERE chave = 'openai_api_key'")).scalar()
+            from services.config_svc import ia_disponivel, registrar_uso_ia
+            api_key, msg_ia = ia_disponivel()
             
             if not api_key:
                 return {
-                    "resumoParetoIA": "A Rakiti AI requer uma API Key configurada para gerar o Pareto Analítico.", 
-                    "recomendacaoIA": "Configure a chave da OpenAI no painel administrativo."
+                    "resumoParetoIA": msg_ia, 
+                    "recomendacaoIA": ""
                 }
 
             # 👉 BUSCAMOS O CONTEXTO REAL PARA ALIMENTAR A IA
@@ -4131,11 +4134,12 @@ async def get_bi_ia_reports(periodo: str = Query("Últimos 6 Meses"), segmento: 
             }
 
         client = openai.OpenAI(api_key=str(api_key).strip())
+        registrar_uso_ia()
         
         prompt = f"""
-        Atue como a 'Rakiti AI', um Consultor Sênior de Business Intelligence em Customer Success.
+        Atue como a 'Rakiti AI', um Consultor Sênior de Sucesso do Cliente. Responda em português do Brasil, com linguagem simples para pequenas e médias empresas.
         
-        CONTEXTO ATUAL (Filtros aplicados pelo utilizador):
+        CONTEXTO ATUAL (Filtros aplicados pelo usuário):
         - Período: {periodo}
         - Segmento: {segmento}
         - Tamanho/ARR: {arr}
@@ -4550,7 +4554,7 @@ def corrigir_historico_nomes(tabela: str, coluna: str, de_nome: str, para_nome: 
             
         return {
             "status": "Sucesso", 
-            "mensagem": f"Foram atualizados {linhas_afetadas} registos de '{de_nome}' para '{para_nome}' na tabela {tabela}!"
+            "mensagem": f"Foram atualizados {linhas_afetadas} registros de '{de_nome}' para '{para_nome}' na tabela {tabela}!"
         }
     except Exception as e:
         return {"erro": str(e)}
@@ -4746,3 +4750,33 @@ def criar_conta_plataforma(req: NovaContaRequest):
             criar_configuracoes_padrao(conn, dominios)
             criar_usuario_admin(conn, req.admin_nome.strip(), email, req.admin_senha)
     return {"status": "success", "conta_id": conta_id, "message": f"Conta '{req.nome.strip()}' criada."}
+
+
+@app.get("/api/ia/uso")
+def uso_da_ia(usuario_email: str = Depends(get_current_user)):
+    """Uso de análises de IA da conta no mês (a IA está incluída no plano)."""
+    from services.config_svc import uso_mensal_ia, limite_mensal_ia, get_openai_token
+    return {"usadas": uso_mensal_ia(), "limite": limite_mensal_ia(), "ativa": bool(get_openai_token())}
+
+
+@app.get("/api/onboarding")
+def progresso_primeiros_passos(usuario_email: str = Depends(get_current_user)):
+    """Progresso do guia de primeiro acesso da conta."""
+    with get_engine().connect() as conn:
+        cfg = {r[0]: r[1] for r in conn.execute(text(
+            "SELECT chave, valor FROM dbo.nps_configuracoes WHERE chave IN ('survey_url', 'envios_ativos')"))}
+        clientes = conn.execute(text("SELECT COUNT(*) FROM dbo.nps_clientes")).scalar() or 0
+        respostas = conn.execute(text("SELECT COUNT(*) FROM dbo.nps_respostas WHERE excluido = 0 OR excluido IS NULL")).scalar() or 0
+        disparos = conn.execute(text("SELECT COUNT(*) FROM dbo.nps_disparos WHERE status = 'Enviado'")).scalar() or 0
+    passos = {
+        "clientes": clientes > 0,
+        "formulario": str(cfg.get("survey_url") or "").startswith("https://"),
+        "envio": disparos > 0,
+        "respostas": respostas > 0,
+    }
+    return {
+        "passos": passos,
+        "concluido": all(passos.values()),
+        "totais": {"clientes": clientes, "respostas": respostas, "disparos": disparos},
+        "envios_ativos": str(cfg.get("envios_ativos") or "").lower() in ("true", "1"),
+    }

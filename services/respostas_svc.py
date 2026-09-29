@@ -244,7 +244,7 @@ def processar_acao_automatica(resposta_id: str, nota: int, empresa_id: int, empr
                 if historico_lista:
                     historico_str = "\n📜 Histórico de Respostas Anteriores deste Cliente:\n" + "\n".join(historico_lista)
                 else:
-                    historico_str = "\n📜 Histórico: Este é o primeiro registo detalhado do cliente."
+                    historico_str = "\n📜 Histórico: Este é o primeiro registro detalhado do cliente."
                     
             except Exception as e_hist:
                 print(f"Aviso ao buscar histórico: {e_hist}")
@@ -256,27 +256,23 @@ def processar_acao_automatica(resposta_id: str, nota: int, empresa_id: int, empr
             texto_motivo = motivo.strip() if motivo else "O cliente apenas deu a nota e não deixou comentário."
             descricao_txt = f"🚨 Ticket gerado automaticamente via sistema NPS.\n\n💬 Comentário Original:\n\"{texto_motivo}\""
             
-            chave_api = None
-            try:
-                res_chave = conn.execute(text("SELECT valor FROM dbo.nps_configuracoes WHERE chave = 'OPENAI_API_KEY'")).fetchone()
-                if res_chave and res_chave.valor:
-                    chave_api = res_chave.valor.strip()
-            except Exception:
-                pass
+            from services.config_svc import ia_disponivel, registrar_uso_ia
+            chave_api, msg_ia = ia_disponivel()
             
             if not chave_api:
-                descricao_txt += "\n\n⚠️ [ERRO DO SISTEMA]: A análise da Rakiti AI não foi gerada porque a chave 'OPENAI_API_KEY' não foi encontrada."
+                descricao_txt += f"\n\nℹ️ Análise automática da Rakiti AI não gerada: {msg_ia}"
             else:
                 try:
                     from openai import OpenAI
                     client = OpenAI(api_key=chave_api)
+                    registrar_uso_ia()
                     
                     prompt_ai = f"""
-Atue como um especialista sênior em Customer Success.
+Atue como um especialista sênior em Sucesso do Cliente. Responda em português do Brasil, com linguagem simples.
 CENÁRIO ATUAL: O cliente '{empresa_nome}' acabou de dar nota {nota} no NPS.
 Comentário de agora: '{texto_motivo}'
 {historico_str}
-TAREFA: Crie um plano de ação direto, prático e em bullet points (máximo 3 passos curtos) para a nossa equipa atuar. 
+TAREFA: Crie um plano de ação direto, prático e em bullet points (máximo 3 passos curtos) para a nossa equipe atuar. 
 Comece a sua resposta exatamente com a frase: '🤖 Análise Rakiti AI:' e não inclua saudações.
 """
                     resposta_ai = client.chat.completions.create(
@@ -421,7 +417,7 @@ def processar_webhook_fillout(payload: dict):
                 """)
                 conn.execute(sql_update_cli, {"cid": cliente_id})
 
-        print(f"✅ Nova Resposta Guardada! Cliente: {nome} | Empresa: {empresa} | Nota: {nota}")
+        print(f"✅ Nova Resposta Salva! Cliente: {nome} | Empresa: {empresa} | Nota: {nota}")
 
         processar_acao_automatica(
             resposta_id=resposta_id,

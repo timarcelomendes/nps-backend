@@ -31,6 +31,14 @@ CONFIGURACOES_PADRAO = [
     ("sla_neutro_dias", "5", "SLA de tratamento de neutros"),
     ("sla_promotor_dias", "10", "SLA de tratamento de promotores"),
     ("openai_model", "gpt-4o-mini", "Modelo de IA"),
+    ("scheduler_hora_inicio", "09:00", "Horário do primeiro envio do dia"),
+    ("scheduler_horas", "6", "Intervalo entre rodadas de envio (horas)"),
+    ("teams_horario_resumo", "08:00", "Horário do resumo diário no Teams"),
+    ("lembrete_qtd_maxima", "2", "Quantidade máxima de lembretes"),
+    ("lembrete_dias_1", "3", "Dias até o 1º lembrete"),
+    ("lembrete_dias_2", "7", "Dias até o 2º lembrete"),
+    ("lembrete_dias_3", "15", "Dias até o 3º lembrete"),
+    ("fillout_campos", "clienteId,email,nome,empresa,empresa_id", "Dados enviados ao formulário"),
     ("ai_temperature", "0.3", "Criatividade da IA"),
 ]
 

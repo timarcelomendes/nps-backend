@@ -11,7 +11,7 @@ from pydantic import BaseModel
 # 🎯 IMPORTAÇÕES SEGURAS
 from database import get_engine
 from services.auth_svc import get_current_user
-from services.config_svc import get_openai_token
+from services.config_svc import ia_disponivel, registrar_uso_ia
 
 class ChatRequest(BaseModel):
     mensagem: str
@@ -20,20 +20,20 @@ class ChatRequest(BaseModel):
 router = APIRouter(prefix="/chat", tags=["Intelligence"])
 
 SYSTEM_PROMPT = """
-Tu és o ANALISTA SÉNIOR DE ESTRATÉGIA da Rakiti.
-O teu único conhecimento vem das ferramentas SQL disponibilizadas. 
-NUNCA uses o termo "Chapter", substitui sempre por "Portfólio".
+Você é o ANALISTA SÊNIOR DE ESTRATÉGIA da Rakiti. Responda SEMPRE em português do Brasil, de forma simples e direta, para donos e gestores de pequenas e médias empresas.
+Seu único conhecimento vem das ferramentas SQL disponibilizadas.
+Use a palavra "Carteira" para o conjunto de clientes (nunca "Chapter" ou "Portfólio").
 
 ⚠️ MAPEAMENTO DE FERRAMENTA:
-- Pedidos de "Visão Geral", "Portfólio" ou "Geral" -> usa nome_empresa='Geral' e comparar=False.
-- Pedidos de "Comparativo", "Evolução", "Tendência" ou "Deltas" -> usa comparar=True.
+- Pedidos de "Visão Geral", "Carteira", "Portfólio" ou "Geral" -> use nome_empresa='Geral' e comparar=False.
+- Pedidos de "Comparativo", "Evolução", "Tendência" ou "Deltas" -> use comparar=True.
 
 🎨 REGRAS DE LAYOUT VERTICAL (OBRIGATÓRIO):
 
-# [Nome do Cliente ou Portfólio]
+# [Nome do Cliente ou Carteira]
 
 ## 📊 Scorecard de Performance
-(Apresenta os dados em lista vertical para máxima clareza)
+(Apresente os dados em lista vertical para máxima clareza)
 
 CASO A) Se for um "Snapshot 30 Dias":
 **Métrica:** NPS
@@ -61,14 +61,14 @@ CASO B) Se for um "Comparativo Trimestral":
 - (Bullet points curtos com a síntese do qualitativo)
 
 ## 💡 Insights Estratégicos
-> (Usa blockquotes para recomendações de alta prioridade. Ex: "A queda no volume de respostas do cliente X sugere necessidade de reforço no engajamento da pesquisa.")
+> (Use blockquotes para recomendações de alta prioridade. Ex: "A queda no volume de respostas do cliente X sugere necessidade de reforço no engajamento da pesquisa.")
 
 ⚠️ EXCEÇÕES E DADOS PARCIAIS:
 1. Se clicares em "Ver elogio/detrator" e a ferramenta retornar o texto na íntegra, imprime o comentário completo formatado em *itálico* usando um blockquote (>).
-2. Se o "Comparativo Mensal" indicar "Início de tracking", explica rapidamente ao utilizador que este é o primeiro mês com volume de respostas do cliente. NÃO digas "sem registos".
+2. Se o "Comparativo Mensal" indicar "Início de tracking", explica rapidamente ao usuário que este é o primeiro mês com volume de respostas do cliente. NÃO digas "sem registros".
 
 ⚠️ REGRAS DE OURO:
-1. PROIBIDO dizer "não tenho acesso". Se não houver dados, informa: "Sem registos para [Nome] nos últimos 30 dias".
+1. PROIBIDO dizer "não tenho acesso". Se não houver dados, informa: "Sem registros para [Nome] nos últimos 30 dias".
 2. PROIBIDO inventar dados. Se a ferramenta SQL falhar, reporta o erro técnico.
 3. SENIOREITY: Mantém um tom executivo, focado em resultados e ações.
 """
@@ -193,7 +193,7 @@ def db_obter_comentario_especifico(nome_empresa: str, trecho_comentario: str):
 def obter_sugestoes_dinamicas(nome_empresa: str = None):
     # 🎯 1. Limpeza do Fallback (Removido o termo 'Chapter')
     if not nome_empresa:
-        return ["NPS Geral do Portfólio", "Principais detratores", "Comparativo trimestral"]
+        return ["NPS geral da carteira", "Principais detratores", "Comparativo trimestral"]
     
     """Busca um exemplo de cada extremo para gerar tags clicáveis"""
     try:
@@ -229,7 +229,7 @@ def obter_sugestoes_dinamicas(nome_empresa: str = None):
             return sugestoes
     except:
         # Fallback em caso de erro no banco
-        return ["Visão Portfólio", "Alertas Críticos", "Evolução Trimestral"]
+        return ["Visão da carteira", "Alertas Críticos", "Evolução Trimestral"]
         
 
 # ==========================================
@@ -238,7 +238,12 @@ def obter_sugestoes_dinamicas(nome_empresa: str = None):
 
 @router.post("/perguntar")
 async def perguntar_inteligencia(requisicao: ChatRequest, usuario = Depends(get_current_user)):
-    token = get_openai_token()
+    token, msg_ia = ia_disponivel()
+    if not token:
+        async def _aviso():
+            yield f"data: {json.dumps({'texto': msg_ia})}\n\n"
+        return StreamingResponse(_aviso(), media_type="text/event-stream")
+    registrar_uso_ia()
     client = openai.OpenAI(api_key=token)
 
     mensagens = [{"role": "system", "content": SYSTEM_PROMPT}]

@@ -29,7 +29,7 @@ def registrar_log_disparo(email, nome, status, assunto, erro=None, cliente_id=No
             conn.execute(sql, {
                 "cid": cliente_id,
                 "eid": empresa_id,
-                "nome": nome or "Utilizador Sistema",
+                "nome": nome or "Usuário Sistema",
                 "email": email,
                 "status": status,
                 "assunto": assunto,
@@ -189,7 +189,7 @@ def get_valid_access_token():
     return gerar_access_token(config)
 
 def enviar_email_recuperacao(email_destino, nome_usuario, token):
-    """Envia o e-mail com o link de recuperação de palavra-passe com design premium."""
+    """Envia o e-mail com o link de recuperação de senha com design premium."""
     access_token = get_valid_access_token()
     if not access_token:
         print("❌ Falha crítica: Não foi possível obter Access Token para recuperação de senha.")
@@ -201,11 +201,11 @@ def enviar_email_recuperacao(email_destino, nome_usuario, token):
     link_recuperacao = f"{frontend_url}/redefinir-senha?token={token}"
     
     # Se o nome vier vazio por algum motivo, usamos uma saudação genérica amigável
-    saudacao_nome = nome_usuario if nome_usuario else "Utilizador"
+    saudacao_nome = nome_usuario if nome_usuario else "Usuário"
 
     payload = {
         "message": {
-            "subject": "Redefinição de Palavra-passe - Rakiti",
+            "subject": "Redefinição de Senha - Rakiti",
             "body": {
                 "contentType": "HTML",
                 "content": f"""
@@ -229,12 +229,12 @@ def enviar_email_recuperacao(email_destino, nome_usuario, token):
                                             <h2 style="color: #0f172a; font-size: 20px; margin-bottom: 15px;">Recuperação de Acesso</h2>
                                             <p style="color: #475569; font-size: 15px; line-height: 1.6;">
                                                 Olá, <strong>{saudacao_nome}</strong>,<br><br>
-                                                Recebemos um pedido para repor a palavra-passe da sua conta. Clique no botão abaixo para prosseguir:
+                                                Recebemos um pedido para repor a senha da sua conta. Clique no botão abaixo para prosseguir:
                                             </p>
                                             
                                             <div style="text-align: center; margin: 30px 0;">
                                                 <a href="{link_recuperacao}" style="background-color: #f97316; color: #ffffff; padding: 14px 25px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block; text-transform: uppercase; font-size: 13px;">
-                                                    Criar Nova Palavra-passe
+                                                    Criar Nova Senha
                                                 </a>
                                             </div>
                                             
@@ -269,14 +269,14 @@ def enviar_email_recuperacao(email_destino, nome_usuario, token):
             email_destino, 
             saudacao_nome, # 👈 Aqui o log deixa de ser genérico!
             status, 
-            "Recuperação de Palavra-passe", 
+            "Recuperação de Senha", 
             erro=erro_msg, 
             url=link_recuperacao
         )
         
         return response.status_code == 202
     except Exception as e:
-        registrar_log_disparo(email_destino, saudacao_nome, "Erro", "Recuperação de Palavra-passe", erro=str(e), url=link_recuperacao)
+        registrar_log_disparo(email_destino, saudacao_nome, "Erro", "Recuperação de Senha", erro=str(e), url=link_recuperacao)
         return False
     
 
@@ -299,9 +299,9 @@ def enviar_email_senha_alterada(email_destino: str, nome_usuario: str):
             <div style="font-family: Arial, sans-serif; max-width: 500px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px;">
                 <h2 style="color: #0f172a;">Aviso de Segurança</h2>
                 <p>Olá, <strong>{nome_usuario}</strong>,</p>
-                <p>Informamos que a sua palavra-passe no <strong>Rakiti</strong> foi alterada com sucesso.</p>
+                <p>Informamos que a sua senha no <strong>Rakiti</strong> foi alterada com sucesso.</p>
                 <p style="background-color: #fff7ed; padding: 15px; border-radius: 8px; border-left: 4px solid #f97316; color: #9a3412;">
-                    <strong>Não foi você?</strong> Se não realizou esta alteração, entre em contacto com o administrador imediatamente.
+                    <strong>Não foi você?</strong> Se não realizou esta alteração, entre em contato com o administrador imediatamente.
                 </p>
                 <p style="font-size: 12px; color: #64748b; margin-top: 20px;">Este é um e-mail automático, por favor não responda.</p>
             </div>
@@ -309,7 +309,7 @@ def enviar_email_senha_alterada(email_destino: str, nome_usuario: str):
 
             email_body = {
                 "message": {
-                    "subject": "Segurança: Palavra-passe Alterada - Rakiti",
+                    "subject": "Segurança: Senha Alterada - Rakiti",
                     "body": {"contentType": "HTML", "content": html_content},
                     "toRecipients": [{"emailAddress": {"address": email_destino}}]
                 }
@@ -550,7 +550,7 @@ def enviar_email_resposta(email_destino: str, nome: str, empresa: str, nota: int
     if template_customizado:
         mail_html = tornar_links_absolutos(template_customizado).replace("{nome}", primeiro_nome).replace("{empresa}", empresa_exibicao).replace("{nota}", str(nota)).replace("{motivo}", motivo if motivo else "N/A").replace("{expectativas}", expectativas if expectativas else "N/A").replace("{o_que_faltava}", o_que_faltava if o_que_faltava else "N/A")
     else:
-        mail_html = f"<h2>Obrigado, {primeiro_nome}!</h2><p>A sua nota {nota} foi registada para a empresa {empresa_exibicao}.</p>"
+        mail_html = f"<h2>Obrigado, {primeiro_nome}!</h2><p>A sua nota {nota} foi cadastrada para a empresa {empresa_exibicao}.</p>"
 
     payload = {
         "message": {"subject": assunto, "body": {"contentType": "HTML", "content": mail_html}, "toRecipients": [{"emailAddress": {"address": email_destino}}]},
@@ -590,7 +590,7 @@ def enviar_email_confirmacao(email_destino: str, nome_usuario: str, secret_key: 
         "sub": email_destino, 
         "exp": expire, 
         "tipo_token": "confirmacao_email",
-        "origin": url_frontend  # O token memoriza de onde o utilizador veio!
+        "origin": url_frontend  # O token memoriza de onde o usuário veio!
     }
     token = jwt.encode(payload, secret_key, algorithm=algorithm)
     
@@ -613,10 +613,10 @@ def enviar_email_confirmacao(email_destino: str, nome_usuario: str, secret_key: 
             <div style="font-family: Arial, sans-serif; max-width: 500px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px;">
                 <h2 style="color: #1e293b;">Confirme o seu e-mail</h2>
                 <p>Olá, <strong>{nome_usuario}</strong>!</p>
-                <p>Recebemos um pedido de registo no Rakiti com este e-mail.</p>
+                <p>Recebemos um pedido de registro no Rakiti com este e-mail.</p>
                 <p>Para comprovar a titularidade da conta, por favor clique no botão abaixo:</p>
                 <a href="{link_confirmacao}" style="display: inline-block; background-color: #f97316; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; margin: 20px 0;">Verificar Meu E-mail</a>
-                <p style="font-size: 12px; color: #64748b;">Se não solicitou este registo, pode ignorar este e-mail.</p>
+                <p style="font-size: 12px; color: #64748b;">Se não solicitou este registro, pode ignorar este e-mail.</p>
             </div>
             """
 

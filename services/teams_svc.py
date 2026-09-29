@@ -318,7 +318,7 @@ def enviar_alerta_tecnico_teams(mensagem_erro: str):
         if resposta.status_code not in (200, 201, 202):
             print(f"❌ Falha ao disparar alerta técnico no Teams: HTTP {resposta.status_code} - {resposta.text}")
         else:
-            print("📨 [Teams SVC] Alerta técnico enviado com sucesso para a equipa.")
+            print("📨 [Teams SVC] Alerta técnico enviado com sucesso para a equipe.")
             
     except Exception as e:
         print(f"❌ Erro interno ao tentar enviar alerta técnico para o Teams: {e}")

@@ -37,7 +37,9 @@ services:
       - key: SUPERADMIN_EMAILS
         sync: false           # e-mail(s) que administram a plataforma (criam contas de clientes)
       - key: OPENAI_API_KEY
-        sync: false           # opcional (também pode ser salva na tela de Configurações)
+        sync: false           # chave da PLATAFORMA (a IA é incluída no plano; clientes não configuram chave)
+      - key: IA_LIMITE_MENSAL
+        value: "500"          # análises de IA por conta por mês
     # Disco persistente para uploads: disponível só em plano pago. Ao mudar para starter, descomente:
     # disk:
     #   name: uploads
