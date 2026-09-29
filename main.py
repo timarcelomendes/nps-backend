@@ -40,7 +40,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 # Importações Locais
 from database import get_engine, exec_sql
-from services.mail_provider import post_email, usando_resend
+from services.mail_provider import post_email, usando_resend, provedor_email
 from services.email_svc import enviar_email_recuperacao, processar_disparos_nps, validar_dominio_email, enviar_email_confirmacao, validar_senha_forte, enviar_email_senha_alterada
 from services import clientes_svc, respostas_svc, dashboard_svc, importacao_svc
 from services.teams_svc import enviar_resumo_matinal_gestores, enviar_alerta_tecnico_teams
@@ -3457,8 +3457,8 @@ async def buscar_config_email():
             dados.pop("client_secret", None)
             dados.pop("refresh_token", None)
 
-            # Envio de e-mails da plataforma (Resend)
-            dados["provedor"] = "resend" if usando_resend() else "nao_configurado"
+            # Envio de e-mails da plataforma (ZeptoMail/Zoho ou Resend)
+            dados["provedor"] = provedor_email() or "nao_configurado"
             dados["remetente_email"] = os.getenv("EMAIL_REMETENTE", "").strip() or dados.get("email_remetente") or ""
             dados["remetente_nome"] = os.getenv("EMAIL_REMETENTE_NOME", "").strip()
             

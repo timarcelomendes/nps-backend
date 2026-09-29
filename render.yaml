@@ -20,7 +20,9 @@ services:
         generateValue: true   # o Render gera uma chave aleatória
       - key: ENCRYPTION_KEY
         sync: false           # gere com: python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
-      - key: RESEND_API_KEY
+      - key: ZEPTOMAIL_TOKEN        # Zoho ZeptoMail: token "Send Mail" do Mail Agent
+        sync: false
+      - key: EMAIL_RESPONDER_PARA   # ex.: contato@rakiti.com (caixa do Zoho Mail)
         sync: false
       - key: EMAIL_REMETENTE
         value: pesquisa@rakiti.com

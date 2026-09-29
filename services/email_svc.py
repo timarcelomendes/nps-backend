@@ -237,7 +237,7 @@ def gerar_access_token(config):
 def get_valid_access_token():
     """Função mestre para obter um token pronto para uso"""
     if usando_resend():
-        return "resend"  # com Resend não há token OAuth; o envio usa RESEND_API_KEY
+        return "plataforma"  # provedor da plataforma (ZeptoMail/Resend): não há token OAuth
     config = obter_configuracoes_email()
     if not config or not config['refresh_token']:
         print("⚠️ E-mail não configurado ou não autorizado.")
