@@ -34,6 +34,8 @@ services:
         value: Marcelo Mendes
       - key: DOMINIOS_PERMITIDOS
         sync: false           # ex.: rakiti.com, gmail.com (padrão: domínio do ADMIN_EMAIL)
+      - key: SUPERADMIN_EMAILS
+        sync: false           # e-mail(s) que administram a plataforma (criam contas de clientes)
       - key: OPENAI_API_KEY
         sync: false           # opcional (também pode ser salva na tela de Configurações)
     # Disco persistente para uploads: disponível só em plano pago. Ao mudar para starter, descomente:

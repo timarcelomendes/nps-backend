@@ -40,6 +40,19 @@ def registrar_log_disparo(email, nome, status, assunto, erro=None, cliente_id=No
         # Deixa o erro evidente no console para debug rápido
         print(f"❌ ERRO GRAVE NO LOG DE E-MAIL para {email}: {str(e)}")
 
+def link_pesquisa_configurado(regras: dict) -> bool:
+    url = str(regras.get("survey_url") or "").strip()
+    return url.startswith("https://")
+
+
+def montar_link_pesquisa(base: str, query_string: str) -> str:
+    """Junta o link do formulário da conta (Configurações) com os parâmetros do cliente."""
+    base = str(base or "").strip()
+    if not query_string:
+        return base
+    return f"{base}{'&' if '?' in base else '?'}{query_string}"
+
+
 def obter_regras_dinamicas():
     """Lê as parametrizações de negócio da base de dados"""
     from database import get_engine
@@ -50,6 +63,7 @@ def obter_regras_dinamicas():
         "sla_neutro_dias": 5,
         "sla_promotor_dias": 7,
         "fillout_campos": "clienteId,email,nome,empresa,empresa_id",
+        "survey_url": "",
         "email_template_html": "",
         "email_agradecimento_promotor": "",
         "email_agradecimento_neutro": "",
@@ -67,7 +81,7 @@ def obter_regras_dinamicas():
                 FROM dbo.nps_configuracoes 
                 WHERE chave IN (
                     'sla_detrator_dias', 'sla_neutro_dias', 'sla_promotor_dias', 
-                    'fillout_campos', 'email_template_html', 
+                    'fillout_campos', 'survey_url', 'email_template_html', 
                     'email_agradecimento_promotor', 'email_agradecimento_neutro', 'email_agradecimento_detrator',
                     'email_template_lembrete_1', 'email_template_lembrete_2', 'email_template_lembrete_3'
                 )
@@ -191,7 +205,7 @@ def enviar_email_recuperacao(email_destino, nome_usuario, token):
 
     payload = {
         "message": {
-            "subject": "Redefinição de Palavra-passe - NPS Intelligence",
+            "subject": "Redefinição de Palavra-passe - Rakiti",
             "body": {
                 "contentType": "HTML",
                 "content": f"""
@@ -285,7 +299,7 @@ def enviar_email_senha_alterada(email_destino: str, nome_usuario: str):
             <div style="font-family: Arial, sans-serif; max-width: 500px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px;">
                 <h2 style="color: #0f172a;">Aviso de Segurança</h2>
                 <p>Olá, <strong>{nome_usuario}</strong>,</p>
-                <p>Informamos que a sua palavra-passe no <strong>NPS Intelligence</strong> foi alterada com sucesso.</p>
+                <p>Informamos que a sua palavra-passe no <strong>Rakiti</strong> foi alterada com sucesso.</p>
                 <p style="background-color: #fff7ed; padding: 15px; border-radius: 8px; border-left: 4px solid #f97316; color: #9a3412;">
                     <strong>Não foi você?</strong> Se não realizou esta alteração, entre em contacto com o administrador imediatamente.
                 </p>
@@ -295,7 +309,7 @@ def enviar_email_senha_alterada(email_destino: str, nome_usuario: str):
 
             email_body = {
                 "message": {
-                    "subject": "Segurança: Palavra-passe Alterada - NPS Intelligence",
+                    "subject": "Segurança: Palavra-passe Alterada - Rakiti",
                     "body": {"contentType": "HTML", "content": html_content},
                     "toRecipients": [{"emailAddress": {"address": email_destino}}]
                 }
@@ -329,7 +343,7 @@ def enviar_email_teste(email_destino):
     url_send = "https://graph.microsoft.com/v1.0/me/sendMail"
     payload = {
         "message": {
-            "subject": "Teste de Conexão - NPS Intelligence ✅",
+            "subject": "Teste de Conexão - Rakiti ✅",
             "body": {
                 "contentType": "HTML",
                 "content": """<div style="font-family: sans-serif; border: 2px solid #10b981; padding: 20px; border-radius: 15px;"><h2 style="color: #10b981;">Conexão Bem-sucedida!</h2></div>"""
@@ -344,13 +358,13 @@ def enviar_email_teste(email_destino):
     try:
         response = post_email(url_send, json=payload, headers=headers)
         if response.status_code == 202:
-            registrar_log_disparo(email_destino, "Administrador", "Enviado", "Teste de Conexão - NPS Intelligence ✅")
+            registrar_log_disparo(email_destino, "Administrador", "Enviado", "Teste de Conexão - Rakiti ✅")
             return True
         else:
-            registrar_log_disparo(email_destino, "Administrador", "Erro", "Teste de Conexão - NPS Intelligence ✅", erro=response.text)
+            registrar_log_disparo(email_destino, "Administrador", "Erro", "Teste de Conexão - Rakiti ✅", erro=response.text)
             return False 
     except Exception as e:
-        registrar_log_disparo(email_destino, "Administrador", "Erro", "Teste de Conexão - NPS Intelligence ✅", erro=str(e))
+        registrar_log_disparo(email_destino, "Administrador", "Erro", "Teste de Conexão - Rakiti ✅", erro=str(e))
         return False
 
 def processar_disparos_nps():
@@ -387,6 +401,9 @@ def processar_disparos_nps():
         
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
         regras = obter_regras_dinamicas()
+        if not link_pesquisa_configurado(regras):
+            print("⚠️ Link do formulário de pesquisa não configurado (Configurações > Regras). Disparos suspensos.")
+            return
         campos_permitidos = [c.strip().lower() for c in regras.get("fillout_campos", "").split(",")]
         template_customizado = tornar_links_absolutos(regras.get("email_template_html", ""))
 
@@ -399,7 +416,7 @@ def processar_disparos_nps():
                         "empresa": cliente["empresa"] or "", "empresa_id": str(cliente["empresa_id"]) if cliente["empresa_id"] else ""
                     }
                     query_string = urllib.parse.urlencode({k: v for k, v in params_completos.items() if k.lower() in campos_permitidos and v})
-                    survey_url = f"https://forms.fillout.com/t/dPJSvuBRcDus?{query_string}"
+                    survey_url = montar_link_pesquisa(regras.get("survey_url"), query_string)
                     
                     nome_exibicao = cliente["nome"].split(" ")[0] if cliente["nome"] else "Parceiro"
                     empresa_exibicao = cliente["empresa"] or "sua empresa"
@@ -466,6 +483,11 @@ def disparar_convite_nps_especifico(cliente_ids: list, dominio_origem: str = Non
         if not access_token: return
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
         regras = obter_regras_dinamicas()
+        if not link_pesquisa_configurado(regras):
+            print("⚠️ Link do formulário de pesquisa não configurado (Configurações > Regras). Disparo cancelado.")
+            for cliente in clientes:
+                registrar_log_disparo(cliente["email"], cliente["nome"], "Erro", "[Pesquisa NPS]", "Link do formulário de pesquisa não configurado em Configurações > Regras.", cliente["cliente_id"], cliente["empresa_id"])
+            return
         campos_raw = regras.get("fillout_campos") or "clienteId,email,nome"
         campos_permitidos = [c.strip().lower() for c in campos_raw.split(",")]
         template_customizado = tornar_links_absolutos(regras.get("email_template_html") or "", dominio_origem)
@@ -475,7 +497,7 @@ def disparar_convite_nps_especifico(cliente_ids: list, dominio_origem: str = Non
                 try:
                     params_finais = {k: v for k, v in {"clienteId": cliente["cliente_id"], "email": cliente["email"], "nome": cliente["nome"], "empresa": cliente["empresa"] or "", "empresa_id": str(cliente["empresa_id"]) if cliente["empresa_id"] else ""}.items() if k.lower() in campos_permitidos and v}
                     query_string = urllib.parse.urlencode(params_finais)
-                    survey_url = f"https://forms.fillout.com/t/dPJSvuBRcDus?{query_string}"
+                    survey_url = montar_link_pesquisa(regras.get("survey_url"), query_string)
                     nome_exibicao = cliente["nome"].split(" ")[0] if cliente["nome"] else "Parceiro"
                     empresa_exibicao = cliente["empresa"] or "sua empresa"
                     
@@ -591,7 +613,7 @@ def enviar_email_confirmacao(email_destino: str, nome_usuario: str, secret_key: 
             <div style="font-family: Arial, sans-serif; max-width: 500px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 10px;">
                 <h2 style="color: #1e293b;">Confirme o seu e-mail</h2>
                 <p>Olá, <strong>{nome_usuario}</strong>!</p>
-                <p>Recebemos um pedido de registo no NPS Intelligence com este e-mail.</p>
+                <p>Recebemos um pedido de registo no Rakiti com este e-mail.</p>
                 <p>Para comprovar a titularidade da conta, por favor clique no botão abaixo:</p>
                 <a href="{link_confirmacao}" style="display: inline-block; background-color: #f97316; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; margin: 20px 0;">Verificar Meu E-mail</a>
                 <p style="font-size: 12px; color: #64748b;">Se não solicitou este registo, pode ignorar este e-mail.</p>
@@ -600,7 +622,7 @@ def enviar_email_confirmacao(email_destino: str, nome_usuario: str, secret_key: 
 
             email_body = {
                 "message": {
-                    "subject": "Confirme o seu e-mail - NPS Intelligence", 
+                    "subject": "Confirme o seu e-mail - Rakiti", 
                     "body": {"contentType": "HTML", "content": html_content}, 
                     "toRecipients": [{"emailAddress": {"address": email_destino}}]
                 }, 

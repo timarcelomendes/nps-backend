@@ -52,39 +52,63 @@ from routers import chat
 # ==========================================
 scheduler = BackgroundScheduler()
 
+def _contas_ativas():
+    from database import modo_sistema as _ms
+    with _ms():
+        with get_engine().connect() as conn:
+            return [r[0] for r in conn.execute(text("SELECT id FROM dbo.nps_contas WHERE ativo = 1 ORDER BY id"))]
+
+
+def _para_cada_conta(func):
+    from database import usando_conta
+    for conta_id in _contas_ativas():
+        with usando_conta(conta_id):
+            try:
+                func()
+            except Exception as e:
+                print(f"❌ Erro no job {getattr(func, '__name__', func)} (conta {conta_id}): {e}")
+
+
+def _resumo_teams_no_horario():
+    from zoneinfo import ZoneInfo
+    from database import usando_conta
+    agora = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    if agora.weekday() >= 5:
+        return
+    for conta_id in _contas_ativas():
+        with usando_conta(conta_id):
+            try:
+                with get_engine().connect() as conn:
+                    valor = conn.execute(text("SELECT valor FROM dbo.nps_configuracoes WHERE chave = 'teams_horario_resumo'")).scalar()
+                hora = int(str(valor).split(":")[0]) if valor and ":" in str(valor) else 8
+                if hora == agora.hour:
+                    enviar_resumo_matinal_gestores()
+            except Exception as e:
+                print(f"❌ Erro no resumo do Teams (conta {conta_id}): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 1. Cria as tabelas e o Admin inicial se o banco estiver vazio
     from bootstrap_db import preparar_banco
     preparar_banco()
 
-    # 2. Ao iniciar o servidor, vai buscar o horário guardado no banco
-    hora_teams, minuto_teams = 8, 0 # Padrão
-    try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            res = conn.execute(text("SELECT valor FROM dbo.nps_configuracoes WHERE chave = 'teams_horario_resumo'")).scalar()
-            if res and ":" in res:
-                hora_teams, minuto_teams = map(int, res.split(":"))
-    except Exception as e:
-        print(f"⚠️ Aviso ao ler horário do Teams (usando padrão 08:00): {e}")
+    # 2. Jobs rodam para cada conta (empresa cliente), com os dados isolados por conta
+    scheduler.add_job(
+        lambda: _para_cada_conta(processar_disparos_nps),
+        IntervalTrigger(hours=6),
+        id="disparo_nps_job",
+        replace_existing=True
+    )
 
-    # Job 1: Robô de Disparo de NPS a cada 6 horas
+    # Resumo matinal do Teams: verifica de hora em hora o horário configurado em cada conta
     scheduler.add_job(
-        processar_disparos_nps, 
-        IntervalTrigger(hours=6), 
-        id="disparo_nps_job", 
+        _resumo_teams_no_horario,
+        CronTrigger(minute=0),
+        id="alerta_matinal_teams_job",
         replace_existing=True
     )
-    
-    # Job 2: Robô de Alertas do Teams (Agora usa as variáveis dinâmicas)
-    scheduler.add_job(
-        enviar_resumo_matinal_gestores, 
-        CronTrigger(day_of_week='mon-fri', hour=hora_teams, minute=minuto_teams), 
-        id="alerta_matinal_teams_job", # 👈 ID correto que você já usava
-        replace_existing=True
-    )
-    
+
     scheduler.start()
     print("⏰ Agendador de tarefas (CRON) iniciado com sucesso! (NPS e Teams)")
     yield
@@ -114,6 +138,47 @@ app.include_router(chat.router, prefix="/api")
 # Rotas administrativas sensíveis exigem perfil Admin.
 # ==========================================
 from fastapi.responses import JSONResponse as _JSONResponse
+
+def _bg(func):
+    """Tarefas em segundo plano rodam na mesma conta da requisição que as criou."""
+    from database import conta_atual, usando_conta
+    conta = conta_atual()
+    def _executar(*args, **kwargs):
+        with usando_conta(conta):
+            return func(*args, **kwargs)
+    _executar.__name__ = getattr(func, "__name__", "tarefa")
+    return _executar
+
+
+def _definir_conta_por_email(email: str):
+    """Descobre a conta do usuário pelo e-mail (acesso de sistema) e a torna a conta ativa."""
+    from database import modo_sistema as _ms, definir_conta as _dc
+    if not email:
+        return None
+    with _ms():
+        with get_engine().connect() as conn:
+            conta = conn.execute(text("SELECT conta_id FROM dbo.nps_usuarios WHERE email = :e"), {"e": email.strip()}).scalar()
+    if conta is not None:
+        _dc(conta)
+    return conta
+
+
+def _definir_conta_por_dominio(email: str):
+    """Para auto-cadastro: acha a ÚNICA conta que libera o domínio do e-mail."""
+    from database import modo_sistema as _ms, definir_conta as _dc
+    try:
+        dominio = email.split("@")[1].strip().lower()
+    except IndexError:
+        raise HTTPException(status_code=400, detail="O formato do e-mail é inválido.")
+    with _ms():
+        with get_engine().connect() as conn:
+            linhas = conn.execute(text("SELECT conta_id, valor FROM dbo.nps_configuracoes WHERE chave = 'dominios_permitidos'")).fetchall()
+    contas = [c for c, v in linhas if dominio in [d.strip().lower() for d in str(v or "").split(",") if d.strip()]]
+    if len(contas) != 1:
+        raise HTTPException(status_code=403, detail="Não foi possível identificar a sua empresa pelo e-mail. Peça ao administrador da sua empresa para criar o seu acesso.")
+    _dc(contas[0])
+    return contas[0]
+
 
 ROTAS_PUBLICAS = {
     "/api/login", "/api/register", "/api/reenviar-confirmacao", "/api/esqueci-senha",
@@ -146,9 +211,20 @@ async def exigir_autenticacao(request: Request, call_next):
             raise JWTError("sem sub")
     except (ExpiredSignatureError, JWTError):
         return _JSONResponse(status_code=401, content={"detail": "Sessão expirada."})
+    if payload.get("conta_id") is None:
+        return _JSONResponse(status_code=401, content={"detail": "Sessão expirada. Faça login novamente."})
+    if caminho.startswith("/api/superadmin/") and not _eh_superadmin(payload.get("sub")):
+        return _JSONResponse(status_code=403, content={"detail": "Acesso restrito à administração da plataforma."})
     if _rota_so_admin(request.method, caminho) and payload.get("tipo") != "Admin":
         return _JSONResponse(status_code=403, content={"detail": "Acesso negado. Apenas Administradores."})
+    from database import definir_conta as _dc
+    _dc(payload["conta_id"])
     return await call_next(request)
+
+
+def _eh_superadmin(email) -> bool:
+    lista = [e.strip().lower() for e in os.getenv("SUPERADMIN_EMAILS", "").split(",") if e.strip()]
+    return bool(email) and email.strip().lower() in lista
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -180,24 +256,38 @@ app.add_middleware(
 # ==========================================
 
 @app.post("/api/webhook/fillout")
-async def receber_webhook_fillout(request: Request, background_tasks: BackgroundTasks):
-    """Rota POST nativa e simples para receber o Fillout"""
+async def receber_webhook_fillout(request: Request, background_tasks: BackgroundTasks, token: str = ""):
+    """Recebe as respostas do Fillout. Exige o token secreto da conta (?token=...)."""
+    token = (token or request.headers.get("x-webhook-token", "")).strip()
+    conta_id = _conta_por_webhook_token(token)
+    if conta_id is None:
+        raise HTTPException(status_code=401, detail="Token do webhook ausente ou inválido.")
     try:
         payload = await request.json()
         from services.webhook_svc import processar_webhook_background
-        background_tasks.add_task(processar_webhook_background, payload)
+        background_tasks.add_task(processar_webhook_background, payload, conta_id)
         return {"status": "success", "message": "Recebido"}
         
     except Exception as e:
-        enviar_alerta_tecnico_teams(f"Falha de Recepção no Webhook (Fillout): {str(e)}")
         print(f"❌ Erro ao receber webhook: {e}")
         return {"status": "error", "message": "Falha na leitura"}
 
 
+def _conta_por_webhook_token(token: str):
+    if not token or len(token) < 20:
+        return None
+    from database import modo_sistema as _ms
+    with _ms():
+        with get_engine().connect() as conn:
+            return conn.execute(text("SELECT id FROM dbo.nps_contas WHERE webhook_token = :t AND ativo = 1"), {"t": token}).scalar()
+
+
 @app.get("/api/webhook/fillout")
-async def status_webhook_fillout():
-    """Healthcheck simples para o botão do Frontend"""
-    return {"status": "success", "message": "🟢 Ouvindo POSTs no novo endereço!"}
+async def status_webhook_fillout(token: str = ""):
+    """Healthcheck para o botão do Frontend (valida o token)"""
+    if _conta_por_webhook_token(token) is None:
+        raise HTTPException(status_code=401, detail="Token do webhook ausente ou inválido.")
+    return {"status": "success", "message": "🟢 Webhook ativo e protegido por token."}
 
 from fastapi import Depends, HTTPException, status
 from jose import jwt, JWTError, ExpiredSignatureError
@@ -365,6 +455,7 @@ class RegrasNegocioConfig(BaseModel):
     sla_promotor_dias: int = 7
     recorrencia_dias: int = 90
     fillout_campos: str = "clienteid,email,nome,empresa,empresa_id"
+    survey_url: Optional[str] = ""
     email_template_html: Optional[str] = ""
     email_agradecimento_promotor: Optional[str] = ""
     email_agradecimento_neutro: Optional[str] = ""
@@ -376,7 +467,7 @@ class RegrasNegocioConfig(BaseModel):
     lembrete_qtd_maxima: int = 3
     lembrete_dias_1: int = 3
     lembrete_dias_2: int = 7
-    lembrete_dias_3: int = 15,
+    lembrete_dias_3: int = 15
     robo_ativo: bool = False
 
 class TesteTemplatePayload(BaseModel):
@@ -452,7 +543,7 @@ def update_integracoes(config: IntegracoesUpdate, usuario_email: str = Depends(g
             sql_upsert = text("""
                 INSERT INTO dbo.nps_configuracoes (chave, valor, updated_at)
                     VALUES (:chave, :valor, CURRENT_TIMESTAMP)
-                    ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = CURRENT_TIMESTAMP
+                    ON CONFLICT (conta_id, chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = CURRENT_TIMESTAMP
             """)
             
             # Grava o Webhook Global
@@ -490,6 +581,9 @@ def obter_regras(usuario_email: str = Depends(get_current_user)):
 
 @app.post("/api/config/regras")
 def salvar_regras(payload: RegrasNegocioConfig, usuario_email: str = Depends(get_current_user)):
+    payload.survey_url = (payload.survey_url or "").strip()
+    if payload.survey_url and not payload.survey_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="O link do formulário de pesquisa precisa começar com https://")
     try:
         engine = get_engine()
         with engine.begin() as conn:
@@ -514,7 +608,7 @@ def salvar_regras(payload: RegrasNegocioConfig, usuario_email: str = Depends(get
             sql = text("""
                 INSERT INTO dbo.nps_configuracoes (chave, valor, updated_at)
                     VALUES (:chave, :valor, CURRENT_TIMESTAMP)
-                    ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = CURRENT_TIMESTAMP
+                    ON CONFLICT (conta_id, chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = CURRENT_TIMESTAMP
             """)
             
             for chave, valor in configuracoes.items():
@@ -595,6 +689,8 @@ def testar_template_html(payload: TesteTemplatePayload, usuario_email: str = Dep
 @limiter.limit("5/minute") # 🛡️ Limite de 5 tentativas de login por minuto
 async def login(requisicao: LoginRequest, request: Request):
     try:
+        if _definir_conta_por_email(requisicao.email) is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Este e-mail não está registado na plataforma.")
         engine = get_engine()
         with engine.connect() as conn:
             validar_dominio_email(requisicao.email, conn)
@@ -708,10 +804,13 @@ async def login(requisicao: LoginRequest, request: Request):
             # 🎯 2. Usa o delta no cálculo da expiração (em vez das 8 horas fixas)
             expire = datetime.utcnow() + expires_delta 
 
+            from database import conta_atual as _ca
             to_encode = {
                 "sub": resultado["email"],
                 "exp": expire,
-                "tipo": resultado["tipo"]
+                "tipo": resultado["tipo"],
+                "conta_id": _ca(),
+                "superadmin": _eh_superadmin(resultado["email"])
             }
 
             access_token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
@@ -735,7 +834,8 @@ async def login(requisicao: LoginRequest, request: Request):
                 "cargo": resultado["cargo"],
                 "tipo": resultado["tipo"],
                 "permissoes": lista_permissoes,
-                "avatar_url": avatar_final 
+                "avatar_url": avatar_final,
+                "superadmin": _eh_superadmin(resultado["email"])
             }
 
     except HTTPException:
@@ -756,6 +856,7 @@ async def reenviar_confirmacao(
     background_tasks: BackgroundTasks
 ):
     try:
+        _definir_conta_por_email(req.email)
         engine = get_engine()
         with engine.connect() as conn:
 
@@ -774,7 +875,7 @@ async def reenviar_confirmacao(
             url_backend = f"{request.url.scheme}://{request.url.netloc}"
             from services.email_svc import enviar_email_confirmacao
             
-            background_tasks.add_task(enviar_email_confirmacao, user['email'], SECRET_KEY, ALGORITHM, url_backend)
+            background_tasks.add_task(_bg(enviar_email_confirmacao), user['email'], SECRET_KEY, ALGORITHM, url_backend)
             
             return {"mensagem": "E-mail de confirmação reenviado com sucesso!"}
             
@@ -795,6 +896,7 @@ def verificar_email(token: str):
         
         if not email or not url_origem:
             raise HTTPException(status_code=400, detail="Token inválido")
+        _definir_conta_por_email(email)
 
         engine = get_engine()
         with engine.begin() as conn:
@@ -870,7 +972,8 @@ async def login_microsoft(payload: MicrosoftAuthPayload, request: Request):
             tempo_minutos = int(resultado_tempo) if resultado_tempo and str(resultado_tempo).isdigit() else 60
             
             expire = agora_utc + timedelta(minutes=tempo_minutos)
-            to_encode = {"sub": user_db["email"], "exp": expire, "tipo": user_db["tipo"]}
+            from database import conta_atual as _ca
+            to_encode = {"sub": user_db["email"], "exp": expire, "tipo": user_db["tipo"], "conta_id": _ca()}
             access_token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
             ip_usuario = request.client.host
@@ -911,6 +1014,7 @@ def registrar_usuario(
 ):
     validar_senha_forte(requisicao.password)
     engine = get_engine()
+    _definir_conta_por_dominio(requisicao.email)
     
     with engine.begin() as conn:
         validar_dominio_email(requisicao.email, conn)
@@ -936,8 +1040,7 @@ def registrar_usuario(
             
         url_backend = f"{request.url.scheme}://{request.url.netloc}" 
 
-        background_tasks.add_task(
-            enviar_email_confirmacao, 
+        background_tasks.add_task(_bg(enviar_email_confirmacao), 
             requisicao.email, 
             requisicao.nome,
             SECRET_KEY, 
@@ -967,6 +1070,7 @@ async def resetar_senha(
             
             if email_usuario is None or tipo_token != "reset":
                 raise HTTPException(status_code=400, detail="Token inválido.")
+            _definir_conta_por_email(email_usuario)
         except JWTError:
             raise HTTPException(status_code=400, detail="O link de recuperação expirou ou é inválido.")
 
@@ -997,7 +1101,7 @@ async def resetar_senha(
             nome_usuario = res_user['nome'] if res_user else "Utilizador"
 
         from services.email_svc import enviar_email_senha_alterada
-        background_tasks.add_task(enviar_email_senha_alterada, email_usuario, nome_usuario)
+        background_tasks.add_task(_bg(enviar_email_senha_alterada), email_usuario, nome_usuario)
             
         return {"status": "success", "message": "Palavra-passe alterada com sucesso!"}
             
@@ -1012,6 +1116,7 @@ async def resetar_senha(
 async def solicitar_recuperacao(requisicao: EsqueciSenhaRequest, request: Request, background_tasks: BackgroundTasks):
     engine = get_engine()
     email_limpo = requisicao.email.strip().lower()
+    _definir_conta_por_email(email_limpo)
     
     try:
         with engine.connect() as conn:
@@ -1036,7 +1141,7 @@ async def solicitar_recuperacao(requisicao: EsqueciSenhaRequest, request: Reques
             )
             
             # 🎯 DISPARO COM NOME REAL
-            background_tasks.add_task(enviar_email_recuperacao, email_banco, nome_banco, token)
+            background_tasks.add_task(_bg(enviar_email_recuperacao), email_banco, nome_banco, token)
                 
         return {"mensagem": "E-mail de recuperação enviado."}
     except Exception as e:
@@ -1057,7 +1162,7 @@ async def alterar_minha_senha(requisicao: AlterarSenhaRequest, background_tasks:
         novo_hash = bcrypt.hashpw(requisicao.nova_senha.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         conn.execute(text("UPDATE dbo.nps_usuarios SET senha_hash = :hash WHERE email = :email"), {"hash": novo_hash, "email": usuario_email})
         
-        background_tasks.add_task(enviar_email_senha_alterada, usuario_email, user['nome'])
+        background_tasks.add_task(_bg(enviar_email_senha_alterada), usuario_email, user['nome'])
         
     return {"message": "Senha alterada com sucesso!"}
 
@@ -1210,7 +1315,7 @@ async def save_configuracoes(configs: List[ConfigItem]):
                 conn.execute(text("""
                     INSERT INTO dbo.nps_configuracoes (chave, valor, updated_at)
                     VALUES (:chave, :valor, CURRENT_TIMESTAMP)
-                    ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = CURRENT_TIMESTAMP
+                    ON CONFLICT (conta_id, chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = CURRENT_TIMESTAMP
                 """), {"valor": item.valor, "chave": item.chave})
         return {"status": "success", "detail": "Configurações salvas!"}
     except Exception as e:
@@ -2414,7 +2519,7 @@ def forcar_envio_nps(cliente_id: str, request: Request, background_tasks: Backgr
         
         from services.email_svc import disparar_convite_nps_especifico
         # Passamos o domínio como segundo argumento
-        background_tasks.add_task(disparar_convite_nps_especifico, [cliente_id], dominio_atual)
+        background_tasks.add_task(_bg(disparar_convite_nps_especifico), [cliente_id], dominio_atual)
         
         return {
             "status": "success", 
@@ -2435,7 +2540,7 @@ def forcar_envio_lote(payload: LoteEnvio, request: Request, background_tasks: Ba
 
         from services.email_svc import disparar_convite_nps_especifico
         # Passamos o domínio como segundo argumento
-        background_tasks.add_task(disparar_convite_nps_especifico, payload.cliente_ids, dominio_atual)
+        background_tasks.add_task(_bg(disparar_convite_nps_especifico), payload.cliente_ids, dominio_atual)
         
         registrar_log(
             acao="DISPARO_MANUAL",
@@ -3317,11 +3422,14 @@ async def buscar_config_email():
             
             dados = dict(res._mapping) if res else {}
             
-            # 🎯 2. DESCRIPTOGRAFA PARA EXIBIR NO ECRÃ DO VUE.JS
-            if dados.get("client_secret"):
-                dados["client_secret"] = decrypt_data(dados["client_secret"])
-            if dados.get("refresh_token"):
-                dados["refresh_token"] = decrypt_data(dados["refresh_token"])
+            # 🎯 2. Segredos nunca são devolvidos ao navegador
+            dados.pop("client_secret", None)
+            dados.pop("refresh_token", None)
+
+            # Envio de e-mails da plataforma (Resend)
+            dados["provedor"] = "resend" if usando_resend() else "nao_configurado"
+            dados["remetente_email"] = os.getenv("EMAIL_REMETENTE", "").strip() or dados.get("email_remetente") or ""
+            dados["remetente_nome"] = os.getenv("EMAIL_REMETENTE_NOME", "").strip()
             
             # 3. Busca o estado da Chave Mestra e do SSO
             query_vars = text("SELECT chave, valor FROM dbo.nps_configuracoes WHERE chave IN ('envios_ativos', 'sso_microsoft_ativo')")
@@ -3389,7 +3497,7 @@ async def salvar_config_email(config: ConfigEmailSchema, admin_email: str = Depe
             sql_upsert_cfg = text("""
                 INSERT INTO dbo.nps_configuracoes (chave, valor, updated_at)
                     VALUES (:chave, :valor, CURRENT_TIMESTAMP)
-                    ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = CURRENT_TIMESTAMP
+                    ON CONFLICT (conta_id, chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = CURRENT_TIMESTAMP
             """)
 
             # Toggle: Motor
@@ -3555,7 +3663,7 @@ def forcar_disparo_nps(background_tasks: BackgroundTasks):
     try:
         from services.email_svc import processar_disparos_nps
         # Adiciona a tarefa ao background para responder ao Frontend imediatamente
-        background_tasks.add_task(processar_disparos_nps)
+        background_tasks.add_task(_bg(processar_disparos_nps))
         return {"status": "success", "message": "Disparo iniciado com sucesso! A enviar em segundo plano."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -3568,51 +3676,53 @@ os.makedirs("uploads", exist_ok=True)
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
+def _pasta_imagens_da_conta() -> str:
+    """Cada conta tem a sua pasta de imagens (uploads/c<id>)."""
+    from database import conta_atual
+    pasta = os.path.join("uploads", f"c{conta_atual()}")
+    os.makedirs(pasta, exist_ok=True)
+    return pasta
+
+
+EXTENSOES_IMAGEM = ('.png', '.jpg', '.jpeg', '.gif', '.webp')
+
+
 @app.post("/api/upload-imagem")
 async def upload_imagem_email(file: UploadFile = File(...), request: Request = None):
+    nome = os.path.basename(file.filename or "").replace(" ", "_")
+    if not nome or not nome.lower().endswith(EXTENSOES_IMAGEM):
+        raise HTTPException(status_code=400, detail="Envie uma imagem (png, jpg, gif ou webp).")
     try:
-        # Salva o ficheiro na pasta local
-        file_location = f"uploads/{file.filename}"
-        with open(file_location, "wb+") as file_object:
+        pasta = _pasta_imagens_da_conta()
+        with open(os.path.join(pasta, nome), "wb+") as file_object:
             shutil.copyfileobj(file.file, file_object)
-        
-        # Gera a URL completa pública baseada no domínio do seu backend
         base_url = str(request.base_url).rstrip("/")
-        file_url = f"{base_url}/uploads/{file.filename}"
-        
-        return {"nome": file.filename, "url": file_url}
+        return {"nome": nome, "url": f"{base_url}/{pasta}/{nome}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
         
 @app.get("/api/config/imagens")
 def listar_imagens(request: Request):
-    """Devolve a lista de todas as imagens já hospedadas no servidor"""
+    """Devolve as imagens hospedadas da conta logada"""
     try:
         base_url = str(request.base_url).rstrip("/")
-        imagens = []
-        if os.path.exists("uploads"):
-            for filename in os.listdir("uploads"):
-                if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
-                    imagens.append({
-                        "nome": filename,
-                        "url": f"{base_url}/uploads/{filename}"
-                    })
-        # Ordena para as mais recentes aparecerem primeiro
-        imagens.sort(key=lambda x: os.path.getmtime(f"uploads/{x['nome']}"), reverse=True)
+        pasta = _pasta_imagens_da_conta()
+        imagens = [
+            {"nome": f, "url": f"{base_url}/{pasta}/{f}"}
+            for f in os.listdir(pasta) if f.lower().endswith(EXTENSOES_IMAGEM)
+        ]
+        imagens.sort(key=lambda x: os.path.getmtime(os.path.join(pasta, x['nome'])), reverse=True)
         return imagens
     except Exception as e:
         return []
 
 @app.delete("/api/config/imagens/{nome_arquivo}")
 def remover_imagem(nome_arquivo: str):
-    try:
-        file_path = f"uploads/{nome_arquivo}"
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            return {"status": "success"}
-        raise HTTPException(status_code=404, detail="Imagem não encontrada.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    file_path = os.path.join(_pasta_imagens_da_conta(), os.path.basename(nome_arquivo))
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Imagem não encontrada.")
     
 # ==========================================
 # 👤 GESTOR DE AVATARES DE PERFIL
@@ -3751,7 +3861,7 @@ def salvar_configuracoes_seguranca(payload: SegurancaConfig, usuario_email: str 
             conn.execute(text("""
                 INSERT INTO dbo.nps_configuracoes (chave, valor, updated_at)
                     VALUES ('sessao_expiracao_minutos', :valor, CURRENT_TIMESTAMP)
-                    ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = CURRENT_TIMESTAMP
+                    ON CONFLICT (conta_id, chave) DO UPDATE SET valor = EXCLUDED.valor, updated_at = CURRENT_TIMESTAMP
             """), {"valor": str(payload.tempo_minutos)})
             
         return {"status": "success", "message": "Tempo de sessão atualizado com sucesso!"}
@@ -4552,3 +4662,87 @@ def listar_logs_emails():
     except Exception as e:
         print(f"❌ Erro ao listar logs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# 🏢 CONTA (empresa cliente) E ADMINISTRAÇÃO DA PLATAFORMA
+# ==========================================
+class NovaContaRequest(BaseModel):
+    nome: str
+    admin_nome: str
+    admin_email: str
+    admin_senha: str
+    dominios: Optional[str] = ""
+
+
+def _url_publica_api(request: Request) -> str:
+    return (os.getenv("API_PUBLIC_URL", "").strip() or str(request.base_url)).rstrip("/")
+
+
+@app.get("/api/conta")
+def dados_da_conta(request: Request, usuario_email: str = Depends(get_current_user)):
+    """Dados da conta logada, incluindo a URL (com token) para configurar o webhook no Fillout."""
+    from database import conta_atual, modo_sistema as _ms
+    conta_id = conta_atual()
+    with _ms():
+        with get_engine().connect() as conn:
+            conta = conn.execute(text("SELECT id, nome, plano, webhook_token FROM dbo.nps_contas WHERE id = :id"), {"id": conta_id}).mappings().first()
+    if not conta:
+        raise HTTPException(status_code=404, detail="Conta não encontrada.")
+    return {
+        "id": conta["id"],
+        "nome": conta["nome"],
+        "plano": conta["plano"],
+        "webhook_url": f"{_url_publica_api(request)}/api/webhook/fillout?token={conta['webhook_token']}",
+    }
+
+
+@app.post("/api/conta/webhook/regenerar")
+def regenerar_token_webhook(request: Request, admin_email: str = Depends(exigir_admin)):
+    """Gera um novo token (o link antigo para de funcionar)."""
+    import secrets
+    from database import conta_atual, modo_sistema as _ms
+    novo = secrets.token_hex(24)
+    with _ms():
+        with get_engine().begin() as conn:
+            conn.execute(text("UPDATE dbo.nps_contas SET webhook_token = :t WHERE id = :id"), {"t": novo, "id": conta_atual()})
+    return {"webhook_url": f"{_url_publica_api(request)}/api/webhook/fillout?token={novo}"}
+
+
+@app.get("/api/superadmin/contas")
+def listar_contas_plataforma():
+    from database import modo_sistema as _ms
+    with _ms():
+        with get_engine().connect() as conn:
+            linhas = conn.execute(text("""
+                SELECT c.id, c.nome, c.plano, c.ativo, c.criado_em,
+                       (SELECT COUNT(*) FROM dbo.nps_usuarios u WHERE u.conta_id = c.id) AS usuarios,
+                       (SELECT COUNT(*) FROM dbo.nps_clientes cl WHERE cl.conta_id = c.id) AS clientes,
+                       (SELECT COUNT(*) FROM dbo.nps_respostas r WHERE r.conta_id = c.id) AS respostas
+                FROM dbo.nps_contas c ORDER BY c.id
+            """)).mappings().all()
+    return [dict(l) for l in linhas]
+
+
+@app.post("/api/superadmin/contas")
+def criar_conta_plataforma(req: NovaContaRequest):
+    """Cria uma nova empresa cliente com o seu primeiro usuário Admin."""
+    from database import modo_sistema as _ms, usando_conta
+    from bootstrap_db import criar_configuracoes_padrao, criar_usuario_admin
+    email = req.admin_email.strip().lower()
+    if not req.nome.strip() or "@" not in email:
+        raise HTTPException(status_code=400, detail="Informe o nome da empresa e um e-mail válido.")
+    validar_senha_forte(req.admin_senha)
+    engine = get_engine()
+    with _ms():
+        with engine.connect() as conn:
+            if conn.execute(text("SELECT 1 FROM dbo.nps_usuarios WHERE email = :e"), {"e": email}).scalar():
+                raise HTTPException(status_code=400, detail="Este e-mail já é usado por outro usuário da plataforma.")
+        with engine.begin() as conn:
+            conta_id = conn.execute(text("INSERT INTO dbo.nps_contas (nome) VALUES (:n) RETURNING id"), {"n": req.nome.strip()}).scalar()
+    dominios = (req.dominios or "").strip() or email.split("@")[-1]
+    with usando_conta(conta_id):
+        with engine.begin() as conn:
+            criar_configuracoes_padrao(conn, dominios)
+            criar_usuario_admin(conn, req.admin_nome.strip(), email, req.admin_senha)
+    return {"status": "success", "conta_id": conta_id, "message": f"Conta '{req.nome.strip()}' criada."}

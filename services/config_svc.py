@@ -1,13 +1,11 @@
 import os
-from functools import lru_cache
 from sqlalchemy import text
 from database import get_engine
 
-@lru_cache(maxsize=1)
 def get_openai_token():
     """
     Recupera a API Key do banco de dados. 
-    Usa cache para evitar hits desnecessários ao banco em cada token de stream.
+    (Sem cache: cada conta tem a sua própria chave.)
     Prioridade: variável de ambiente OPENAI_API_KEY; depois a chave salva nas Configurações.
     """
     chave_env = os.getenv("OPENAI_API_KEY", "").strip()
@@ -30,4 +28,4 @@ def get_openai_token():
 
 def clear_config_cache():
     """Limpa o cache caso você altere a chave via Dashboard e precise que ela atualize na hora"""
-    get_openai_token.cache_clear()
+    return None  # mantido por compatibilidade

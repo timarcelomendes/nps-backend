@@ -1,4 +1,6 @@
 import os
+import contextvars
+from contextlib import contextmanager
 from sqlalchemy import create_engine, event, text
 from dotenv import load_dotenv
 
@@ -6,6 +8,42 @@ load_dotenv()
 
 # Instância única do engine (pool de conexões compartilhado)
 _engine_instance = None
+
+# ==========================================
+# 🏢 MULTIEMPRESA
+# Cada requisição/tarefa define a conta ativa. A cada transação o PostgreSQL recebe
+# app.conta_id e as políticas de Row Level Security filtram as linhas dessa conta.
+# ==========================================
+_conta_atual: contextvars.ContextVar = contextvars.ContextVar("conta_atual", default=None)
+_modo_sistema: contextvars.ContextVar = contextvars.ContextVar("modo_sistema", default=False)
+
+
+def definir_conta(conta_id):
+    """Define a conta ativa para as próximas consultas deste contexto."""
+    _conta_atual.set(int(conta_id) if conta_id is not None else None)
+
+
+def conta_atual():
+    return _conta_atual.get()
+
+
+@contextmanager
+def usando_conta(conta_id):
+    token = _conta_atual.set(int(conta_id) if conta_id is not None else None)
+    try:
+        yield
+    finally:
+        _conta_atual.reset(token)
+
+
+@contextmanager
+def modo_sistema():
+    """Acesso entre contas. Use SOMENTE para login, webhooks e tarefas da plataforma."""
+    token = _modo_sistema.set(True)
+    try:
+        yield
+    finally:
+        _modo_sistema.reset(token)
 
 
 def _montar_url() -> str:
@@ -48,6 +86,19 @@ def get_engine():
             "options": "-c search_path=dbo,public -c timezone=UTC",
         },
     )
+
+    @event.listens_for(_engine_instance, "begin")
+    def _definir_contexto_da_transacao(conn):
+        conta = _conta_atual.get()
+        sistema = "on" if _modo_sistema.get() else ""
+        cur = conn.connection.dbapi_connection.cursor()
+        try:
+            cur.execute(
+                "SELECT set_config('app.conta_id', %s, true), set_config('app.sistema', %s, true)",
+                ("" if conta is None else str(conta), sistema),
+            )
+        finally:
+            cur.close()
 
     @event.listens_for(_engine_instance, "before_cursor_execute", retval=True)
     def _converter_parametros(conn, cursor, statement, parameters, context, executemany):
