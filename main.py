@@ -101,6 +101,15 @@ async def lifespan(app: FastAPI):
         replace_existing=True
     )
 
+    # Lembretes para quem não respondeu: uma vez por dia, em horário comercial
+    from services.lembretes_svc import processar_lembretes
+    scheduler.add_job(
+        lambda: _para_cada_conta(processar_lembretes),
+        CronTrigger(hour=10, minute=20, timezone="America/Sao_Paulo"),
+        id="lembretes_job",
+        replace_existing=True
+    )
+
     # Resumo matinal do Teams: verifica de hora em hora o horário configurado em cada conta
     scheduler.add_job(
         _resumo_teams_no_horario,
@@ -109,8 +118,12 @@ async def lifespan(app: FastAPI):
         replace_existing=True
     )
 
+    if os.getenv("DESABILITAR_AGENDADOR", "").lower() in ("1", "true"):
+        print("⏸️ Agendador desligado (DESABILITAR_AGENDADOR).")
+        yield
+        return
     scheduler.start()
-    print("⏰ Agendador de tarefas (CRON) iniciado com sucesso! (NPS e Teams)")
+    print("⏰ Agendador de tarefas (CRON) iniciado com sucesso! (NPS, lembretes e Teams)")
     yield
     scheduler.shutdown()
 
@@ -184,6 +197,7 @@ ROTAS_PUBLICAS = {
     "/api/login", "/api/register", "/api/reenviar-confirmacao", "/api/esqueci-senha",
     "/api/reset-password", "/api/auth/verificar-email", "/api/auth/sso-config",
     "/api/auth/microsoft", "/api/webhook/fillout", "/api/status", "/api/integracao/csat",
+    "/api/cadastro-empresa", "/api/planos", "/api/webhook/asaas",
 }
 PREFIXOS_PUBLICOS = ("/api/pesquisa/",)  # formulário público de pesquisa (link com token)
 
@@ -911,7 +925,7 @@ def verificar_email(token: str):
         engine = get_engine()
         with engine.begin() as conn:
             conn.execute(
-                text("UPDATE dbo.nps_usuarios SET email_verificado = 1, ativo = 0 WHERE email = :email"),
+                text("UPDATE dbo.nps_usuarios SET email_verificado = 1, ativo = CASE WHEN tipo = 'Admin' THEN ativo ELSE 0 END WHERE email = :email"),
                 {"email": email}
             )
             print(f"✅ Usuário {email} verificado com sucesso.")
@@ -2856,8 +2870,10 @@ def inserir_resposta_manual(resp: RespostaManual, usuario_email: str = Depends(g
             # 3. Inserir a resposta (Agora com o resposta_id obrigatório e fuso horário corrigido)
             sql_insert = text("""
                 INSERT INTO dbo.nps_respostas 
-                (resposta_id, cliente_id, empresa, nota, motivo, canal, data_resposta, created_at, excluido) 
-                VALUES (:res_id, :cliente_id, :empresa, :nota, :motivo, :canal, SYSUTCDATETIME(), SYSUTCDATETIME(), 0)
+                (resposta_id, cliente_id, empresa, nota, categoria, motivo, canal, data_resposta, created_at, excluido) 
+                VALUES (:res_id, :cliente_id, :empresa, :nota,
+                        CASE WHEN :nota >= 9 THEN 'Promotor' WHEN :nota >= 7 THEN 'Neutro' ELSE 'Detrator' END,
+                        :motivo, :canal, SYSUTCDATETIME(), SYSUTCDATETIME(), 0)
             """)
             conn.execute(sql_insert, {
                 "res_id": novo_id_resposta,
@@ -4706,6 +4722,7 @@ class NovaContaRequest(BaseModel):
     admin_email: str
     admin_senha: str
     dominios: Optional[str] = ""
+    status_assinatura: Optional[str] = "cortesia"   # cortesia | teste
 
 
 def _url_publica_api(request: Request) -> str:
@@ -4750,7 +4767,8 @@ def listar_contas_plataforma():
     with _ms():
         with get_engine().connect() as conn:
             linhas = conn.execute(text("""
-                SELECT c.id, c.nome, c.plano, c.ativo, c.criado_em,
+                SELECT c.id, c.nome, c.plano, c.ativo, c.criado_em, c.status_assinatura, c.teste_ate,
+                       c.limite_clientes, c.origem, c.email_cobranca,
                        (SELECT COUNT(*) FROM dbo.nps_usuarios u WHERE u.conta_id = c.id) AS usuarios,
                        (SELECT COUNT(*) FROM dbo.nps_clientes cl WHERE cl.conta_id = c.id) AS clientes,
                        (SELECT COUNT(*) FROM dbo.nps_respostas r WHERE r.conta_id = c.id) AS respostas
@@ -4774,7 +4792,12 @@ def criar_conta_plataforma(req: NovaContaRequest):
             if conn.execute(text("SELECT 1 FROM dbo.nps_usuarios WHERE email = :e"), {"e": email}).scalar():
                 raise HTTPException(status_code=400, detail="Este e-mail já é usado por outro usuário da plataforma.")
         with engine.begin() as conn:
-            conta_id = conn.execute(text("INSERT INTO dbo.nps_contas (nome) VALUES (:n) RETURNING id"), {"n": req.nome.strip()}).scalar()
+            conta_id = conn.execute(text("INSERT INTO dbo.nps_contas (nome, status_assinatura) VALUES (:n, 'cortesia') RETURNING id"),
+                                    {"n": req.nome.strip()}).scalar()
+            if req.status_assinatura == "teste":
+                from services.planos_svc import iniciar_teste
+                iniciar_teste(conn, conta_id)
+                conn.execute(text("UPDATE dbo.nps_contas SET origem = 'plataforma' WHERE id = :id"), {"id": conta_id})
     dominios = (req.dominios or "").strip() or email.split("@")[-1]
     with usando_conta(conta_id):
         with engine.begin() as conn:
@@ -5094,3 +5117,300 @@ def responder_formulario_publico(codigo: str, payload: RespostaPesquisa, request
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     return {"status": "success", "message": msg}
+
+
+# ==========================================
+# 🔔 LEMBRETES DE PESQUISA
+# ==========================================
+@app.get("/api/lembretes/previa")
+def previa_lembretes(usuario_email: str = Depends(get_current_user)):
+    """Quantos lembretes sairiam agora (para a tela de Configurações)."""
+    from services.lembretes_svc import _regras, pendentes
+    with get_engine().connect() as conn:
+        regras = _regras(conn)
+        lista = pendentes(conn, regras) if regras["qtd"] > 0 else []
+    return {"ativo": regras["ativo"], "qtd_maxima": regras["qtd"], "dias": regras["dias"][:regras["qtd"]],
+            "pendentes_agora": len(lista)}
+
+
+@app.post("/api/lembretes/executar")
+def executar_lembretes(admin_email: str = Depends(exigir_admin)):
+    """Envia agora os lembretes devidos (a rotina automática roda todo dia às 10h20)."""
+    from services.lembretes_svc import processar_lembretes
+    return {"enviados": processar_lembretes()}
+
+
+# ==========================================
+# 💳 PLANOS, CADASTRO PRÓPRIO E COBRANÇA (ASAAS)
+# ==========================================
+from services import planos_svc as _planos
+from services import asaas_svc as _asaas
+
+DOMINIOS_GRATUITOS = {"gmail.com", "hotmail.com", "outlook.com", "live.com", "yahoo.com", "yahoo.com.br", "icloud.com",
+                      "bol.com.br", "uol.com.br", "terra.com.br", "ig.com.br", "msn.com", "protonmail.com", "gmx.com"}
+
+
+def _mensagem_limite(texto: str):
+    m = re.search(r"Limite do plano atingido[^\n\"]*?Assinatura\.", texto or "")
+    return m.group(0) if m else None
+
+
+@app.exception_handler(HTTPException)
+async def _tratar_http(request: Request, exc: HTTPException):
+    # erros de banco embrulhados em HTTP 500 que na verdade são "limite do plano"
+    msg = _mensagem_limite(str(exc.detail)) if exc.status_code >= 500 else None
+    if msg:
+        return _JSONResponse(status_code=402, content={"detail": msg})
+    return _JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=getattr(exc, "headers", None))
+
+
+from sqlalchemy.exc import DBAPIError as _DBAPIError
+
+
+@app.exception_handler(_DBAPIError)
+async def _tratar_banco(request: Request, exc: _DBAPIError):
+    msg = _mensagem_limite(str(exc))
+    if msg:
+        return _JSONResponse(status_code=402, content={"detail": msg})
+    print(f"❌ Erro de banco: {exc}")
+    return _JSONResponse(status_code=500, content={"detail": "Erro interno ao acessar o banco de dados."})
+
+
+@app.get("/api/planos")
+def listar_planos():
+    return {"planos": _planos.PLANOS, "dias_teste": _planos.DIAS_TESTE}
+
+
+class CadastroEmpresa(BaseModel):
+    empresa: str
+    nome: str
+    email: str
+    senha: str
+    telefone: Optional[str] = ""
+    aceite_termos: bool = False
+
+
+@app.post("/api/cadastro-empresa")
+@limiter.limit("3/minute")
+def cadastrar_empresa(req: CadastroEmpresa, request: Request, background_tasks: BackgroundTasks):
+    """Cadastro próprio: cria a empresa com 14 dias de teste grátis e o primeiro Admin."""
+    from database import modo_sistema as _ms, usando_conta
+    from bootstrap_db import criar_configuracoes_padrao
+    email = (req.email or "").strip().lower()
+    if not req.empresa.strip() or not req.nome.strip() or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise HTTPException(status_code=400, detail="Preencha o nome da empresa, o seu nome e um e-mail válido.")
+    if not req.aceite_termos:
+        raise HTTPException(status_code=400, detail="É preciso aceitar os termos de uso e a política de privacidade.")
+    validar_senha_forte(req.senha)
+    engine = get_engine()
+    with _ms():
+        with engine.connect() as conn:
+            if conn.execute(text("SELECT 1 FROM dbo.nps_usuarios WHERE email = :e"), {"e": email}).scalar():
+                raise HTTPException(status_code=400, detail="Este e-mail já tem acesso à Rakiti. Use 'Esqueci a senha' se precisar.")
+        with engine.begin() as conn:
+            conta_id = conn.execute(text("""
+                INSERT INTO dbo.nps_contas (nome, telefone, email_cobranca) VALUES (:n, :t, :e) RETURNING id
+            """), {"n": req.empresa.strip()[:200], "t": (req.telefone or "").strip()[:30] or None, "e": email}).scalar()
+            _planos.iniciar_teste(conn, conta_id)
+    dominio = email.split("@")[-1]
+    # domínio de e-mail gratuito não serve para liberar colegas automaticamente
+    dominios = "" if dominio in DOMINIOS_GRATUITOS else dominio
+    with usando_conta(conta_id):
+        with engine.begin() as conn:
+            criar_configuracoes_padrao(conn, dominios)
+            conn.execute(text("""
+                INSERT INTO dbo.nps_usuarios (nome, email, senha_hash, tipo, cargo, ativo, email_verificado)
+                VALUES (:n, :e, :h, 'Admin', 'Administrador', 1, 0)
+            """), {"n": req.nome.strip()[:150], "e": email, "h": hash_password(req.senha)})
+    frontend = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+    backend = _url_publica_api(request)
+    with usando_conta(conta_id):
+        background_tasks.add_task(_bg(enviar_email_confirmacao), email, req.nome.strip(), SECRET_KEY, ALGORITHM, frontend, backend)
+        registrar_log(acao="CADASTRO_EMPRESA", mensagem=f"Empresa criada pelo cadastro: {req.empresa.strip()} ({email})", nivel="INFO")
+    return {"status": "success", "message": "Conta criada! Enviamos um link para o seu e-mail. Confirme para entrar."}
+
+
+def _conta_ou_404():
+    from database import conta_atual
+    conta = _planos.dados_conta(conta_atual())
+    if not conta:
+        raise HTTPException(status_code=404, detail="Conta não encontrada.")
+    return conta
+
+
+@app.get("/api/assinatura")
+def ver_assinatura(usuario_email: str = Depends(get_current_user)):
+    conta = _conta_ou_404()
+    sit = _planos.situacao(conta)
+    with get_engine().connect() as conn:
+        cobrancas = conn.execute(text("""
+            SELECT valor, status, forma, vencimento, pago_em, link FROM dbo.nps_cobrancas ORDER BY vencimento DESC NULLS LAST, id DESC LIMIT 24
+        """)).mappings().all()
+    link_aberto = next((c["link"] for c in cobrancas if c["status"] in ("PENDING", "OVERDUE") and c["link"]), None)
+    return {
+        "plano": conta["plano"], "status": sit["status"], "mensagem": sit["mensagem"], "pode_enviar": sit["pode_enviar"],
+        "dias_restantes": sit["dias_restantes"], "teste_ate": conta["teste_ate"].isoformat() if conta["teste_ate"] else None,
+        "limite_clientes": conta["limite_clientes"], "uso": _planos.uso(),
+        "dados_cobranca": {"cpf_cnpj": conta["cpf_cnpj"] or "", "email": conta["email_cobranca"] or "", "telefone": conta["telefone"] or "",
+                           "nome": conta["nome"]},
+        "assinatura_ativa": bool(conta["asaas_subscription_id"]) and sit["status"] != "cancelada",
+        "link_pagamento": link_aberto,
+        "cobrancas": [dict(c) for c in cobrancas],
+        "planos": _planos.PLANOS, "cobranca_configurada": _asaas.configurado(),
+    }
+
+
+class AssinarRequest(BaseModel):
+    plano: str
+    cpf_cnpj: str
+    email_cobranca: str
+    telefone: Optional[str] = ""
+    razao_social: Optional[str] = ""
+
+
+@app.post("/api/assinatura")
+def assinar_plano(req: AssinarRequest, admin_email: str = Depends(exigir_admin)):
+    """Cria (ou troca) a assinatura mensal no Asaas e devolve o link da fatura."""
+    from database import modo_sistema as _ms
+    if req.plano not in _planos.PLANOS:
+        raise HTTPException(status_code=400, detail="Plano inválido.")
+    if not _asaas.documento_valido(req.cpf_cnpj):
+        raise HTTPException(status_code=400, detail="CPF ou CNPJ inválido.")
+    if "@" not in (req.email_cobranca or ""):
+        raise HTTPException(status_code=400, detail="Informe o e-mail que vai receber as faturas.")
+    conta = _conta_ou_404()
+    plano = _planos.PLANOS[req.plano]
+    limite = plano["limite_clientes"]
+    if limite is not None and _planos.uso()["clientes_ativos"] > limite:
+        raise HTTPException(status_code=400, detail=f"Você tem mais de {limite} clientes ativos. Escolha um plano maior ou desative clientes.")
+    nome = (req.razao_social or "").strip() or conta["nome"]
+    descricao = f"Rakiti - plano {plano['nome']}"
+    try:
+        customer = conta["asaas_customer_id"]
+        if customer:
+            _asaas.atualizar_cliente(customer, nome, req.cpf_cnpj, req.email_cobranca, req.telefone)
+        else:
+            customer = _asaas.criar_cliente(nome, req.cpf_cnpj, req.email_cobranca, req.telefone, conta["id"])
+        assinatura = conta["asaas_subscription_id"] if conta["status_assinatura"] != "cancelada" else None
+        if assinatura:
+            _asaas.alterar_valor(assinatura, plano["preco"], descricao)
+        else:
+            assinatura = _asaas.criar_assinatura(customer, plano["preco"], descricao, conta["id"])
+        fatura = _asaas.fatura_em_aberto(assinatura)
+        link = (fatura or {}).get("invoiceUrl")
+    except _asaas.ErroAsaas as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    with _ms():
+        with get_engine().begin() as conn:
+            conn.execute(text("""
+                UPDATE dbo.nps_contas SET asaas_customer_id = :c, asaas_subscription_id = :s, cpf_cnpj = :doc,
+                       email_cobranca = :e, telefone = COALESCE(NULLIF(:t, ''), telefone)
+                WHERE id = :id
+            """), {"c": customer, "s": assinatura, "doc": _asaas.so_digitos(req.cpf_cnpj), "e": req.email_cobranca.strip(),
+                   "t": (req.telefone or "").strip(), "id": conta["id"]})
+            _planos.aplicar_plano(conn, conta["id"], req.plano)
+            if fatura and fatura.get("id"):   # já mostra a fatura na tela, antes do aviso do webhook
+                conn.execute(text("""
+                    INSERT INTO dbo.nps_cobrancas (conta_id, asaas_payment_id, valor, status, forma, vencimento, link, ultimo_evento)
+                    VALUES (:c, :p, :v, :st, :f, :venc, :link, 'CRIADA_PELA_TELA')
+                    ON CONFLICT (asaas_payment_id) DO UPDATE SET valor = EXCLUDED.valor, link = EXCLUDED.link, updated_at = CURRENT_TIMESTAMP
+                """), {"c": conta["id"], "p": fatura["id"], "v": fatura.get("value") or plano["preco"], "st": fatura.get("status"),
+                       "f": fatura.get("billingType"), "venc": fatura.get("dueDate"), "link": fatura.get("invoiceUrl")})
+    registrar_log(acao="ASSINATURA", mensagem=f"Plano {plano['nome']} escolhido.", nivel="INFO")
+    return {"status": "success", "link_pagamento": link}
+
+
+@app.post("/api/assinatura/cancelar")
+def cancelar_plano(admin_email: str = Depends(exigir_admin)):
+    from database import modo_sistema as _ms
+    conta = _conta_ou_404()
+    if conta["asaas_subscription_id"]:
+        try:
+            _asaas.cancelar_assinatura(conta["asaas_subscription_id"])
+        except _asaas.ErroAsaas as e:
+            raise HTTPException(status_code=502, detail=str(e))
+    with _ms():
+        with get_engine().begin() as conn:
+            conn.execute(text("UPDATE dbo.nps_contas SET status_assinatura = 'cancelada' WHERE id = :id"), {"id": conta["id"]})
+    registrar_log(acao="ASSINATURA", mensagem="Assinatura cancelada pelo cliente.", nivel="WARN")
+    return {"status": "success", "message": "Assinatura cancelada. Seus dados continuam guardados."}
+
+
+@app.post("/api/webhook/asaas")
+async def webhook_asaas(request: Request):
+    """Recebe os avisos de pagamento do Asaas e atualiza a situação da conta."""
+    import hmac
+    from database import modo_sistema as _ms
+    esperado = os.getenv("ASAAS_WEBHOOK_TOKEN", "").strip()
+    recebido = request.headers.get("asaas-access-token", "").strip()
+    if not esperado or not hmac.compare_digest(esperado, recebido):
+        raise HTTPException(status_code=401, detail="Token do webhook inválido.")
+    evento = await request.json()
+    tipo = evento.get("event", "")
+    pagamento = evento.get("payment") or {}
+    assinatura = pagamento.get("subscription") or (evento.get("subscription") or {}).get("id")
+    ref = pagamento.get("externalReference") or (evento.get("subscription") or {}).get("externalReference") or ""
+    with _ms():
+        with get_engine().begin() as conn:
+            conta_id = None
+            if assinatura:
+                conta_id = conn.execute(text("SELECT id FROM dbo.nps_contas WHERE asaas_subscription_id = :s"), {"s": assinatura}).scalar()
+            if not conta_id and ref.startswith("conta:") and ref[6:].isdigit():
+                conta_id = int(ref[6:])
+            if not conta_id:
+                return {"status": "ignorado"}   # 200 para o Asaas não reenviar
+
+            if pagamento.get("id"):
+                conn.execute(text("""
+                    INSERT INTO dbo.nps_cobrancas (conta_id, asaas_payment_id, valor, status, forma, vencimento, pago_em, link, ultimo_evento)
+                    VALUES (:c, :p, :v, :st, :f, :venc, :pago, :link, :ev)
+                    ON CONFLICT (asaas_payment_id) DO UPDATE SET valor = EXCLUDED.valor, status = EXCLUDED.status, forma = EXCLUDED.forma,
+                        vencimento = EXCLUDED.vencimento, pago_em = EXCLUDED.pago_em, link = EXCLUDED.link,
+                        ultimo_evento = EXCLUDED.ultimo_evento, updated_at = CURRENT_TIMESTAMP
+                """), {"c": conta_id, "p": pagamento["id"], "v": pagamento.get("value"), "st": pagamento.get("status"),
+                       "f": pagamento.get("billingType"), "venc": pagamento.get("dueDate"),
+                       "pago": pagamento.get("paymentDate") or pagamento.get("confirmedDate"),
+                       "link": pagamento.get("invoiceUrl"), "ev": tipo})
+
+            if tipo in ("PAYMENT_CONFIRMED", "PAYMENT_RECEIVED"):
+                conn.execute(text("UPDATE dbo.nps_contas SET status_assinatura = 'ativa', atrasada_desde = NULL, teste_ate = NULL WHERE id = :id"),
+                             {"id": conta_id})
+            elif tipo == "PAYMENT_OVERDUE":
+                conn.execute(text("""
+                    UPDATE dbo.nps_contas SET status_assinatura = 'atrasada', atrasada_desde = COALESCE(atrasada_desde, CURRENT_TIMESTAMP)
+                    WHERE id = :id AND status_assinatura IN ('ativa', 'atrasada', 'teste')
+                """), {"id": conta_id})
+            elif tipo in ("SUBSCRIPTION_DELETED", "SUBSCRIPTION_INACTIVATED"):
+                conn.execute(text("UPDATE dbo.nps_contas SET status_assinatura = 'cancelada' WHERE id = :id"), {"id": conta_id})
+    return {"status": "ok"}
+
+
+class AjusteContaPlataforma(BaseModel):
+    plano: Optional[str] = None
+    status_assinatura: Optional[str] = None
+    dias_teste: Optional[int] = None
+
+
+@app.put("/api/superadmin/contas/{conta_id}")
+def ajustar_conta_plataforma(conta_id: int, req: AjusteContaPlataforma):
+    """Ajuste manual pelo dono da plataforma (cortesia, estender teste, trocar plano)."""
+    from database import modo_sistema as _ms
+    from datetime import timedelta as _td
+    with _ms():
+        with get_engine().begin() as conn:
+            if not conn.execute(text("SELECT 1 FROM dbo.nps_contas WHERE id = :id"), {"id": conta_id}).scalar():
+                raise HTTPException(status_code=404, detail="Conta não encontrada.")
+            if req.plano:
+                if req.plano not in _planos.PLANOS:
+                    raise HTTPException(status_code=400, detail="Plano inválido.")
+                _planos.aplicar_plano(conn, conta_id, req.plano)
+            if req.status_assinatura:
+                if req.status_assinatura not in ("cortesia", "teste", "ativa", "atrasada", "cancelada"):
+                    raise HTTPException(status_code=400, detail="Situação inválida.")
+                conn.execute(text("UPDATE dbo.nps_contas SET status_assinatura = :s WHERE id = :id"), {"s": req.status_assinatura, "id": conta_id})
+                if req.status_assinatura == "cortesia":
+                    conn.execute(text("UPDATE dbo.nps_contas SET limite_clientes = NULL WHERE id = :id"), {"id": conta_id})
+            if req.dias_teste:
+                conn.execute(text("UPDATE dbo.nps_contas SET status_assinatura = 'teste', teste_ate = :f WHERE id = :id"),
+                             {"f": _planos.agora() + _td(days=max(1, min(req.dias_teste, 90))), "id": conta_id})
+    return {"status": "success"}

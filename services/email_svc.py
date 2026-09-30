@@ -454,6 +454,12 @@ def processar_disparos_nps():
 
         access_token = get_valid_access_token() 
         if not access_token: return
+
+        from services.planos_svc import pode_enviar
+        liberado, motivo = pode_enviar()
+        if not liberado:
+            print(f"⏸️ Disparos automáticos pausados: {motivo}")
+            return
         
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
         regras = obter_regras_dinamicas()
@@ -525,6 +531,12 @@ def disparar_convite_nps_especifico(cliente_ids: list, dominio_origem: str = Non
         access_token = get_valid_access_token() 
         if not access_token: return
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        from services.planos_svc import pode_enviar
+        liberado, motivo = pode_enviar()
+        if not liberado:
+            for cliente in clientes:
+                registrar_log_disparo(cliente["email"], cliente["nome"], "Erro", "[Pesquisa NPS]", motivo, cliente["cliente_id"], cliente["empresa_id"])
+            return
         regras = obter_regras_dinamicas()
         if not link_pesquisa_configurado(regras):
             print("⚠️ Link do formulário de pesquisa não configurado (Configurações > Regras). Disparo cancelado.")

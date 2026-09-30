@@ -240,6 +240,10 @@ def enviar_csat(email: str, nome: str = "", referencia: str = "", assunto: str =
     email = (email or "").strip()
     if "@" not in email and not telefone:
         raise ValueError("Informe o e-mail (ou telefone) do cliente.")
+    from services.planos_svc import pode_enviar
+    liberado, motivo = pode_enviar()
+    if not liberado:
+        raise ValueError(motivo)
     engine = get_engine()
     with engine.begin() as conn:
         fid = formulario_id or fs.id_padrao(conn, "csat")

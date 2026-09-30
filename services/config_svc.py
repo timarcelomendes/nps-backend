@@ -33,6 +33,14 @@ def _chave_uso() -> str:
 
 
 def limite_mensal_ia() -> int:
+    """Limite do plano da conta; contas cortesia usam IA_LIMITE_MENSAL (padrão 500)."""
+    try:
+        from services.planos_svc import limite_ia
+        do_plano = limite_ia()
+        if do_plano is not None:
+            return do_plano
+    except Exception:
+        pass
     try:
         return int(os.getenv("IA_LIMITE_MENSAL", "500"))
     except ValueError:

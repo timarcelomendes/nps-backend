@@ -22,6 +22,12 @@ services:
         sync: false           # gere com: python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
       - key: ZEPTOMAIL_TOKEN        # Zoho ZeptoMail: token "Send Mail" do Mail Agent
         sync: false
+      - key: ASAAS_API_KEY          # chave da API do Asaas ($aact_prod_... em produção)
+        sync: false
+      - key: ASAAS_AMBIENTE         # sandbox enquanto testa; producao para cobrar de verdade
+        value: sandbox
+      - key: ASAAS_WEBHOOK_TOKEN    # o mesmo token configurado no webhook do Asaas
+        generateValue: true
       - key: EMAIL_RESPONDER_PARA   # ex.: contato@rakiti.com (caixa do Zoho Mail)
         sync: false
       - key: EMAIL_REMETENTE
